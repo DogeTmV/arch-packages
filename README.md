@@ -13,8 +13,9 @@ Users add one `[dogetmv]` block once, then install any package with
 Source trees kept alongside the package definitions live in `projects/`:
 
 - [`projects/terminal-autocorrect`](projects/terminal-autocorrect/README.md) —
-  conservative fish command typo correction with a recent-command cache. Its
-  README explains how to permanently add it to fish with `bash install.sh`.
+  conservative fish command typo correction with a recent-command cache,
+  whole-system command discovery, usage-ranked suggestions, and a fish-native
+  installer (`source install.fish`) that activates automatically.
 
 A pacman repo is just a directory plus a `<name>.db` file; nothing ties it to a
 single source project. The repo name is effectively permanent because pacman

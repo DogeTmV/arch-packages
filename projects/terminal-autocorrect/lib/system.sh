@@ -30,6 +30,15 @@ ac_bin() {
     printf '%s\n' "${p:-$name}"
 }
 
+# Valid command names only. Names with spaces, leading dots, or leading
+# dashes are excluded: correcting to them would produce surprising input.
+is_valid_command_name() {
+    local name="$1"
+    [[ -n "$name" ]] || return 1
+    [[ "$name" != -* && "$name" != .* ]] || return 1
+    [[ "$name" =~ ^[A-Za-z0-9_.+@-]+$ ]]
+}
+
 # Pure-bash exact line membership. Avoids grep entirely in trust checks.
 ac_list_contains() {
     local wanted="$1" item

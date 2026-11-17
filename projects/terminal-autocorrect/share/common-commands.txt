@@ -1,50 +1,87 @@
-# Commands that are safe to auto-correct to, even on a machine where the user
-# has never typed them before. One name per line; '#' starts a comment.
-# Keep this list conservative: every name here is eligible for silent
-# correction when it is the single closest command to what was typed.
+# Commands safe to auto-correct to on any machine. One name per line; '#' starts
+# a comment. Every name here is trusted for a unique one-edit correction unless
+# it is also listed in dangerous-commands.txt.
 
-# Navigation and files
-ls pwd cd dir vdir find locate updatedb
-cat tac less more head tail sed awk grep egrep fgrep ripgrep rg
+# Navigation, files, and text processing
+ls pwd cd dir vdir find locate updatedb xargs
+cat tac less more head tail sed awk grep egrep fgrep rg ripgrep ag
 touch mkdir rmdir cp mv rm ln readlink realpath basename dirname
-stat file du df wc sort uniq cut paste join comm tr tee xargs
+stat file du df wc sort uniq cut paste join comm tr tee
 diff cmp patch split csplit expand unexpand fold fmt nl rev
-iconv xxd od hexdump strings
+iconv xxd od hexdump strings sha1sum sha224sum sha256sum sha384sum sha512sum
+md5sum b2sum cksum basenc base64 shuf seq yes printf echo test
+column tree ncdu ranger nnn lf zoxide fd bat fzf
 
-# Shell builtins and everyday utilities
-echo printf test true false sleep date time cal man help history
+# Shell builtins and daily utilities
+true false sleep date time timeout cal man help info history
 clear reset exit logout return break continue eval exec source
 alias unalias function set unset export readonly declare local
 type command builtin hash jobs fg bg wait kill disown nohup
-which whereis whoami id uname hostname uptime free env printenv
-seq bc expr getopt getopts read mapfile shift trap let
+which whereis whoami id uname hostname hostnamectl uptime free
+env printenv getopt getopts read mapfile shift trap let
+logger script scriptreplay expect
 
-# Text editing
-vim vi nano emacs ed joe micro kakoune helix hx
+# Editors and text tools
+vim vi nvim nano emacs ed joe micro kakoune helix hx
+pico jed ne org-mode code codium gnome-text-editor kate mousepad
 
-# Processes and system
-ps top htop btmon pgrep pkill pstree killall nice renice
+# Processes, services, and system information
+ps top htop btop pgrep pkill pstree killall nice renice taskset
 systemctl journalctl service init rc-service
-mount umount lsblk blkid fdisk parted mkfs fsck
-ip ifconfig ping ping6 traceroute mtr netstat ss lsof fuser
-curl wget ssh scp sftp rsync nc socat dig nslookup host whois
+dmesg logrotate cron crontab at watch
+lscpu lsmem lsblk blkid findmnt findfs lsusb lspci lsscsi
+free vmstat iostat mpstat pidstat slabtop
+systemd-analyze coredumpctl loginctl hostnamectl timedatectl localectl
+resolvectl networkctl
 
-# Archives and compression
-tar gzip gunzip bzip2 bunzip2 xz unxz zip unzip 7z unrar
+# Storage, filesystems, and archives
+mount umount fdisk cfdisk sfdisk parted partprobe gdisk
+mkfs mke2fs fsck e2fsck badblocks resize2fs tune2fs dumpe2fs
+btrfs xfs_repair zfs zpool cryptsetup luksFormat losetup
+tar gzip gunzip bzip2 bunzip2 xz unxz zip unzip 7z 7za unrar
+lz4 zstd cpio pax ar bsdtar
 
-# Development
-git hg svn make cmake ninja meson gcc g++ cc clang rustc cargo
-go node npm npx yarn pnpm python python3 pip pip3 ruby gem perl
-java javac mvn gradle php composer lua luarocks dart flutter
-docker podman kubectl terraform ansible ansible-playbook
-gdb strace ltrace valgrind perf gprof
+# Networking
+ip ifconfig ping ping6 traceroute tracepath mtr netstat ss lsof fuser
+curl wget aria2c axel nc ncat socat ssh scp sftp rsync
+dig nslookup host whois arp arping ethtool iw iwlist rfkill
+firewall-cmd ufw iptables nftables tcpdump wireshark tshark
+nmcli nmtui wpa_cli networkmanager speedtest mosh
+
+# Development and build tools
+git hg svn make cmake ninja meson gcc g++ cc c++ clang clang++ rustc cargo
+go node npm npx yarn pnpm bun deno python python3 pip pip3 uv
+ruby gem bundle perl cpan php composer lua luajit luarocks
+java javac jshell mvn gradle scala sbt kotlin kotlinc
+dotnet csc mono swift dart flutter
+gdb lldb strace ltrace valgrind perf gprof addr2line nm objdump readelf
+ar ranlib strip ld as pkg-config pkgconf
+docker podman kubectl helm terraform ansible ansible-playbook
+vagrant qemu qemu-system-x86_64 virt-manager
+jq yq xmlstarlet xmllint sqlite3
 
 # Package managers
-pacman yay paru apt apt-get dpkg dnf yum apk zypper pacman-key
+pacman pacman-key yay paru trizen pikaur reflector
+apt apt-get dpkg dpkg-query aptitude dnf yum microdnf
+apk zypper rpm emerge eopkg xbps-install xbps-query
+flatpak snap brew pipx cargo-install
 
-# Terminal multiplexers and misc
-tmux screen bash fish zsh sh dash
+# Terminal, shells, and multiplexers
+tmux screen byobu bash fish zsh sh dash ksh csh tcsh
+stty tput tset clear reset tmuxinator starship
 chmod chown chgrp umask sudo doas su passwd
-crontab at watch yes dmesg logrotate
-sha256sum sha1sum md5sum openssl gpg gpg2 base64
-column tree neofetch fastfetch
+ssh-agent ssh-add gpg gpg2 gpg-agent openssl
+
+# Media and desktop helpers
+ffmpeg ffprobe mpv vlc mplayer sox pactl wpctl pamixer playerctl
+convert magick identify gimp inkscape
+xdg-open xdg-mime xdg-settings xdg-user-dir
+gio gsettings dconf notify-send wl-copy wl-paste xclip xsel
+grim slurp swaymsg hyprctl waybar
+neofetch fastfetch screenfetch
+
+# Miscellaneous
+bc dc expr units factor seq base64 openssl gpg age
+watch why yes time strace file strings locate
+makepkg repo-add repo-remove updpkgsums
+ltrace getfacl setfacl getent id nproc getconf

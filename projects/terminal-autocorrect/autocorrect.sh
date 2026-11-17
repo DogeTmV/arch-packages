@@ -6,11 +6,11 @@
 
 set -uo pipefail
 
-AC_VERSION='2.0.0'
+AC_VERSION='2.1.0'
 AC_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 export AC_ROOT
 
-for _lib in system distance candidates common cache policy; do
+for _lib in system distance candidates common cache ranking system_commands policy; do
     source "$AC_ROOT/lib/$_lib.sh"
 done
 unset _lib
@@ -23,10 +23,12 @@ Usage:
   autocorrect.sh check <typed> [args...]   Decide about an unknown command
   autocorrect.sh sudo <target> [args...]   Decide about sudo's target
   autocorrect.sh explain <typed> [args...] Human-readable decision report
-  autocorrect.sh candidates <typed>        List close command names
+  autocorrect.sh candidates <typed>        List close command names (usage ranked)
   autocorrect.sh cache <action> [name]     Manage recent-command cache
                  actions: rebuild, ensure, list, stats, add, add-line,
                           clear, path
+  autocorrect.sh system <action>           Manage system command base
+                 actions: rebuild, ensure, list, stats, path
   autocorrect.sh version                   Print version
   autocorrect.sh help                      Print this help
 
@@ -38,13 +40,32 @@ EOF
 }
 
 cmd_candidates() {
-    local typed="${1:-}" cand d max="${AC_MAX_SUGGEST_DIST:-2}"
+    local typed="${1:-}" cand d max="${AC_MAX_SUGGEST_DIST:-3}"
+    local -a names=() ranked=()
     is_valid_command_name "$typed" || return 0
     while IFS= read -r cand; do
         [[ "$cand" == "$typed" ]] && continue
         d="$(distance_at_most "$typed" "$cand" "$max")"
-        ((d <= max)) && printf '%s\t%s\n' "$cand" "$d"
+        ((d <= max)) && names+=("$cand")
     done < <(collect_all_candidates)
+    ((${#names[@]} > 0)) || return 0
+    mapfile -t ranked < <(printf '%s\n' "${names[@]}" | rank_matches)
+    for cand in "${ranked[@]}"; do
+        d="$(distance_at_most "$typed" "$cand" "$max")"
+        printf '%s\t%s\n' "$cand" "$d"
+    done
+}
+
+cmd_system() {
+    local action="${1:-stats}"
+    case "$action" in
+        rebuild) system_commands_rebuild; system_commands_stats ;;
+        ensure) system_commands_ensure; system_commands_stats ;;
+        list) collect_system_command_names ;;
+        stats) system_commands_stats ;;
+        path) system_commands_cache_file ;;
+        *) printf 'unknown system action: %s\n' "$action" >&2; return 2 ;;
+    esac
 }
 
 cmd_cache() {
@@ -95,6 +116,10 @@ case "$mode" in
     cache)
         shift
         cmd_cache "$@"
+        ;;
+    system)
+        shift
+        cmd_system "$@"
         ;;
     *)
         printf 'unknown mode: %s\n' "$mode" >&2

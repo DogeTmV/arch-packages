@@ -5,15 +5,9 @@
 if ! declare -F ac_bin >/dev/null 2>&1; then
     source "$(dirname "${BASH_SOURCE[0]}")/system.sh"
 fi
-
-# Names with spaces, leading dots, or leading dashes are deliberately
-# excluded: correcting to them would produce surprising command lines.
-is_valid_command_name() {
-    local name="$1"
-    [[ -n "$name" ]] || return 1
-    [[ "$name" != -* && "$name" != .* ]] || return 1
-    [[ "$name" =~ ^[A-Za-z0-9_.+@-]+$ ]]
-}
+if ! declare -F collect_system_command_names >/dev/null 2>&1; then
+    source "$(dirname "${BASH_SOURCE[0]}")/system_commands.sh"
+fi
 
 collect_all_candidates() {
     local search_path="${AC_SEARCH_PATH:-$PATH}"
@@ -37,6 +31,11 @@ collect_all_candidates() {
         for name in "${extras[@]}"; do
             is_valid_command_name "$name" && printf '%s\n' "$name"
         done
+        if [[ "${AC_DISCOVER_SYSTEM_COMMANDS:-1}" == 1 ]]; then
+            while IFS= read -r name; do
+                [[ -n "$name" ]] && is_valid_command_name "$name" && printf '%s\n' "$name"
+            done < <(collect_system_command_names)
+        fi
     } | LC_ALL=C "$(ac_bin sort)" -u | {
         local candidate skip
         while IFS= read -r candidate; do

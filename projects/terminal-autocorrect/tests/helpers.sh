@@ -17,6 +17,7 @@ ac_test_init() {
     export AC_SEARCH_PATH="$AC_TEST_BIN"
     export AC_HISTORY_FILES="$AC_TEST_TMP/fish_history"
     export AC_NO_AUTO_CACHE=1
+    export AC_DISCOVER_SYSTEM_COMMANDS=0
     : > "$AC_HISTORY_FILES"
     mkdir -p "$HOME"
 

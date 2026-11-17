@@ -1,5 +1,27 @@
 # Changelog
 
+## 2.1.0
+
+- Added whole-system command discovery: standard bin/sbin dirs, `PATH`,
+  package-owned files (`pacman -Qlq`, dpkg fallback), and fish function and
+  completion names. Discoveries are suggestion candidates only, never trusted
+  for auto-run.
+- Added `lib/system_commands.sh` with a cached, atomic, flock-protected system
+  base and `autocorrect.sh system rebuild|stats|list|path`.
+- Added `lib/ranking.sh` and `share/popular-commands.txt`. Suggestions are now
+  ordered by usage count, common-list membership, popular-list boost, then
+  alphabetically. Ranking never grants trust.
+- Widened suggestion search to three edits plus a shared-prefix/substring
+  fallback. Only unique one-edit trusted matches are still auto-run.
+- Expanded `share/common-commands.txt` with a much larger trusted command base.
+- Added `install.fish`, which installs and activates the hooks in the current
+  fish process with a single `source` command.
+- Added `AC_DISCOVER_SYSTEM_COMMANDS`, `AC_SYSTEM_COMMAND_DIRS`,
+  `AC_PACKAGE_FILE_LIST`, `AC_FISH_FUNCTIONS_DIR`,
+  `AC_FISH_COMPLETIONS_DIR`, `AC_SYSTEM_COMMANDS_MAX_AGE`,
+  `AC_POPULAR_FILE`, `AC_MAX_SUGGEST_DIST`, and `AC_SIMILAR_PREFIX_LEN`.
+- Expanded the suite to 166 tests across 12 isolated suites.
+
 ## 2.0.0
 
 - Rebuilt as a modular project: `lib/system.sh`, `distance.sh`,

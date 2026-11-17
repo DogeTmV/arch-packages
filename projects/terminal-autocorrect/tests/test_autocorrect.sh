@@ -11,7 +11,7 @@ make_bin ls cd grep make last sudo pacman frobnicate abcdefgh rm
 
 # --- original hook contract -------------------------------------------------
 assert_eq 'unique minor typo -> RUN' $'RUN\tls' "$(run check lss)"
-assert_eq 'two equally close candidates -> SUGGEST' $'SUGGEST\tlast\tls' "$(run check lst)"
+assert_eq 'two equally close candidates -> usage-ranked SUGGEST' $'SUGGEST\tls\tlast' "$(run check lst)"
 assert_eq 'transposed letters -> RUN' $'RUN\tls' "$(run check sl)"
 assert_eq 'no close candidate -> NONE' 'NONE' "$(run check xyzzy)"
 
@@ -31,6 +31,10 @@ assert_eq 'untrusted unique typo -> SUGGEST' \
     $'SUGGEST\tfrobnicate' "$(run check frobnicat)"
 assert_eq 'distance-two match -> SUGGEST' \
     $'SUGGEST\tabcdefgh' "$(run check abXdefXh)"
+assert_eq 'distance-three match -> SUGGEST' \
+    $'SUGGEST\tabcdefgh' "$(run check abXXefYh)"
+assert_eq 'similar-substring fallback -> SUGGEST' \
+    $'SUGGEST\tabcdefgh' "$(run check zzabcdefghzz)"
 assert_eq 'dangerous command -> SUGGEST' \
     $'SUGGEST\trm' "$(run check rrm)"
 
@@ -67,8 +71,20 @@ run cache clear
 out="$(run cache list)"
 assert_count_lines 'cache clear empties the cache' 0 "$out"
 
+# --- system command base subcommands ---------------------------------------
+export AC_SYSTEM_COMMAND_DIRS="$AC_TEST_BIN"
+export AC_PACKAGE_FILE_LIST="$AC_TEST_TMP/empty-pkg-files.txt"
+: > "$AC_PACKAGE_FILE_LIST"
+out="$(run system stats)"
+assert_contains 'system stats reports a cache path' 'system-commands.txt' "$out"
+out="$(run system path)"
+assert_contains 'system path reports the cache file' 'system-commands.txt' "$out"
+run system rebuild
+out="$(run system stats)"
+assert_contains 'system rebuild reports command count' 'commands=' "$out"
+
 # --- help and error handling ------------------------------------------------
-assert_eq 'version' '2.0.0' "$(run version)"
+assert_eq 'version' '2.1.0' "$(run version)"
 assert_contains 'help mentions check' 'check <typed>' "$(run help)"
 run no-such-mode >/dev/null 2>&1
 assert_eq 'unknown mode exits 2' 2 "$?"

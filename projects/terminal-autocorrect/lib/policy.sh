@@ -8,12 +8,14 @@
 #   * no sudo usage is involved (except a pacman target)
 # Everything else becomes a suggestion, never an execution.
 
-for _lib in system distance candidates common cache; do
+for _lib in system distance candidates common cache ranking system_commands; do
     if ! declare -F "$(case "$_lib" in
         distance) echo damerau_levenshtein ;;
         candidates) echo is_valid_command_name ;;
         common) echo common_commands ;;
         cache) echo cache_names ;;
+        ranking) echo usage_score ;;
+        system_commands) echo collect_system_command_names ;;
         system) echo ac_bin ;;
     esac)" >/dev/null 2>&1; then
         source "$(dirname "${BASH_SOURCE[0]}")/$_lib.sh"
@@ -26,6 +28,7 @@ declare -g AC_CORRECTION=''
 declare -g AC_MATCHES=''
 declare -g AC_REASON=''
 declare -g AC_DISTANCE=0
+declare -g AC_MATCH_KIND=''
 
 _dangerous_file() {
     printf '%s\n' "${AC_DANGEROUS_FILE:-${AC_ROOT:-}/share/dangerous-commands.txt}"
@@ -75,54 +78,100 @@ _policy_sudo_context() {
     return 1
 }
 
+# Fallback for typos too distant for the bounded edit-distance search.
+# Shared prefixes and substrings catch cases like `zzgitstatuszz` -> `git`
+# without ever making them eligible for automatic execution.
+_policy_is_similar() {
+    local typed="$1" cand="$2" prefixlen="$3"
+    # Ignore one/two-letter substrings: they match almost everything and
+    # would drown out the real suggestion.
+    ((${#typed} >= prefixlen && ${#cand} > prefixlen)) || return 1
+    [[ "${typed:0:prefixlen}" == "${cand:0:prefixlen}" ]] && return 0
+    [[ "$typed" == *"$cand"* || "$cand" == *"$typed"* ]] && return 0
+    return 1
+}
+
 # Core analysis. $1 is the command token to correct; $2 is 1 when privileged
 # execution forces a suggestion.
 policy_analyze_base() {
     local typed="$1" force="${2:-0}"
-    local maxdist="${AC_MAX_SUGGEST_DIST:-2}"
+    local maxdist="${AC_MAX_SUGGEST_DIST:-3}"
     local minlen="${AC_MIN_LEN_FOR_D2:-4}"
-    local limit="${AC_MAX_SUGGESTIONS:-5}"
-    local -a d1=() d2=() matches=()
-    local cand d item joined=''
+    local limit="${AC_MAX_SUGGESTIONS:-8}"
+    local prefixlen="${AC_SIMILAR_PREFIX_LEN:-2}"
+    local -a all_candidates=() d1=() d2=() d3=() matches=() similar=()
+    local cand d joined=''
 
     AC_DECISION='NONE'
     AC_CORRECTION=''
     AC_MATCHES=''
     AC_REASON=''
     AC_DISTANCE=0
+    AC_MATCH_KIND=''
 
     cache_ensure || true
     is_valid_command_name "$typed" || { AC_REASON='invalid command token'; return; }
 
     while IFS= read -r cand; do
+        all_candidates+=("$cand")
+    done < <(collect_all_candidates)
+
+    for cand in "${all_candidates[@]}"; do
         [[ "$cand" == "$typed" ]] && continue
         d="$(distance_at_most "$typed" "$cand" "$maxdist")"
         case "$d" in
             1) d1+=("$cand") ;;
             2) d2+=("$cand") ;;
+            3) d3+=("$cand") ;;
         esac
-    done < <(collect_all_candidates)
+    done
 
     if ((${#d1[@]} > 0)); then
         matches=("${d1[@]}")
         AC_DISTANCE=1
+        AC_MATCH_KIND='one-edit'
     elif ((${#d2[@]} > 0)) && ((${#typed} >= minlen)); then
         matches=("${d2[@]}")
         AC_DISTANCE=2
+        AC_MATCH_KIND='two-edit'
+    elif ((${#d3[@]} > 0)) && ((${#typed} >= minlen)); then
+        matches=("${d3[@]}")
+        AC_DISTANCE=3
+        AC_MATCH_KIND='three-edit'
     else
-        AC_REASON='no close candidate'
-        return
+        if ((${#typed} >= minlen)); then
+            for cand in "${all_candidates[@]}"; do
+                [[ "$cand" == "$typed" ]] && continue
+                _policy_is_similar "$typed" "$cand" "$prefixlen" && similar+=("$cand")
+            done
+        fi
+        if ((${#similar[@]} > 0)); then
+            matches=("${similar[@]}")
+            AC_DISTANCE=4
+            AC_MATCH_KIND='similar'
+        else
+            AC_REASON='no close candidate'
+            return
+        fi
     fi
 
+    # Usage ranking changes only the order shown to the user. It can never
+    # make an untrusted or distant match eligible for automatic execution.
+    if ((${#matches[@]} > 0)); then
+        mapfile -t matches < <(printf '%s\n' "${matches[@]}" | rank_matches)
+    fi
     if ((${#matches[@]} > limit)); then
         matches=("${matches[@]:0:limit}")
     fi
-    joined="$(IFS=$'\t'; printf '%s' "${matches[*]}")"
-    AC_MATCHES="$joined"
+    AC_MATCHES="$(IFS=$'\t'; printf '%s' "${matches[*]}")"
 
-    if ((AC_DISTANCE == 2)); then
+    if ((AC_DISTANCE != 1)); then
         AC_DECISION='SUGGEST'
-        AC_REASON='distance two suggestion'
+        case "$AC_DISTANCE" in
+            2) AC_REASON='distance two suggestion' ;;
+            3) AC_REASON='distance three suggestion' ;;
+            4) AC_REASON='similar command suggestion' ;;
+        esac
         return
     fi
     if ((${#d1[@]} > 1)); then
@@ -185,6 +234,6 @@ policy_emit() {
 
 policy_explain() {
     policy_analyze "$@"
-    printf 'command: %s\ndecision: %s\ncorrection: %s\ncandidates: %s\ndistance: %s\nreason: %s\n' \
-        "${1:-}" "$AC_DECISION" "$AC_CORRECTION" "$AC_MATCHES" "$AC_DISTANCE" "$AC_REASON"
+    printf 'command: %s\ndecision: %s\ncorrection: %s\ncandidates: %s\ndistance: %s\nkind: %s\nreason: %s\n' \
+        "${1:-}" "$AC_DECISION" "$AC_CORRECTION" "$AC_MATCHES" "$AC_DISTANCE" "$AC_MATCH_KIND" "$AC_REASON"
 }

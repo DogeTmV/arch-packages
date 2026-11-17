@@ -33,7 +33,7 @@ unset AC_COMMON_FILE
 make_bin last
 out="$(analyze lst)"
 assert_eq 'ambiguous typo suggests every close command' \
-    $'SUGGEST||last\tls|multiple close commands' "$out"
+    $'SUGGEST||ls\tlast|multiple close commands' "$out"
 
 # 4. a recently used command (not in common list) becomes trusted
 make_bin mytool
@@ -116,7 +116,7 @@ make_bin lstx
 export AC_MAX_SUGGESTIONS=2
 out="$(analyze lst)"
 assert_eq 'suggestion limit is honored' \
-    $'SUGGEST||last\tls|multiple close commands' "$out"
+    $'SUGGEST||ls\tlast|multiple close commands' "$out"
 unset AC_MAX_SUGGESTIONS
 
 export AC_MIN_LEN_FOR_D2=10
@@ -124,5 +124,14 @@ out="$(analyze abXdefXh)"
 assert_eq 'minimum length suppresses distance-two suggestions' \
     'NONE|||no close candidate' "$out"
 unset AC_MIN_LEN_FOR_D2
+
+# 13. wider suggestion search still never auto-runs
+out="$(analyze abXXefYh)"
+assert_eq 'distance-three match is SUGGEST only' \
+    'SUGGEST||abcdefgh|distance three suggestion' "$out"
+
+out="$(analyze zzabcdefghzz)"
+assert_eq 'similar-substring fallback is SUGGEST only' \
+    'SUGGEST||abcdefgh|similar command suggestion' "$out"
 
 ac_test_summary

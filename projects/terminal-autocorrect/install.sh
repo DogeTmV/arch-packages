@@ -12,6 +12,7 @@ mkdir -p "$target/lib" "$target/share" "$config_dir/conf.d"
 
 install -m 755 "$root/autocorrect.sh" "$target/autocorrect.sh"
 install -m 644 "$root/fish_integration.fish" "$target/fish_integration.fish"
+install -m 644 "$root/install.fish" "$target/install.fish"
 for lib in "$root"/lib/*.sh; do
     install -m 644 "$lib" "$target/lib/"
 done

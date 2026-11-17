@@ -1,0 +1,8 @@
+# Commands that appear first among equally close suggestions. This affects
+# ordering only, not trust: a command listed here is never auto-run unless it
+# is also cached or in common-commands.txt.
+ls cd pwd cat grep sed awk find git vim nano less man
+cp mv rm mkdir touch echo printf ps top kill htop
+sudo pacman apt dnf apk make cargo npm python python3 pip
+curl wget ssh scp rsync systemctl journalctl docker
+sort head tail tar gzip unzip chmod chown bash fish zsh

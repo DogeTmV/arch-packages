@@ -1,7 +1,7 @@
-.PHONY: test install uninstall cache-rebuild cache-stats help
+.PHONY: test install uninstall cache-rebuild cache-stats system-rebuild system-stats help
 
 help:
-	@printf 'Targets: test install uninstall cache-rebuild cache-stats help\n'
+	@printf 'Targets: test install uninstall cache-rebuild cache-stats system-rebuild system-stats help\n'
 
 test:
 	@bash tests/run_all.sh
@@ -17,3 +17,9 @@ cache-rebuild:
 
 cache-stats:
 	@bash autocorrect.sh cache stats
+
+system-rebuild:
+	@bash autocorrect.sh system rebuild
+
+system-stats:
+	@bash autocorrect.sh system stats
