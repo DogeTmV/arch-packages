@@ -1,0 +1,33 @@
+# Correcting to these commands is never done silently, even if they appear in
+# the recent-command cache or the common-command list. A suggestion is shown
+# instead so the user can review the destructive command themselves.
+rm
+rmdir
+dd
+shred
+truncate
+wipefs
+mkfs
+mkfs.ext2
+mkfs.ext3
+mkfs.ext4
+mkfs.xfs
+mkfs.vfat
+mke2fs
+fdisk
+cfdisk
+parted
+mount
+umount
+systemctl
+service
+shutdown
+reboot
+halt
+poweroff
+chown
+chmod
+passwd
+su
+visudo
+iptables

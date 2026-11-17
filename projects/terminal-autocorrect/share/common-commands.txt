@@ -1,0 +1,50 @@
+# Commands that are safe to auto-correct to, even on a machine where the user
+# has never typed them before. One name per line; '#' starts a comment.
+# Keep this list conservative: every name here is eligible for silent
+# correction when it is the single closest command to what was typed.
+
+# Navigation and files
+ls pwd cd dir vdir find locate updatedb
+cat tac less more head tail sed awk grep egrep fgrep ripgrep rg
+touch mkdir rmdir cp mv rm ln readlink realpath basename dirname
+stat file du df wc sort uniq cut paste join comm tr tee xargs
+diff cmp patch split csplit expand unexpand fold fmt nl rev
+iconv xxd od hexdump strings
+
+# Shell builtins and everyday utilities
+echo printf test true false sleep date time cal man help history
+clear reset exit logout return break continue eval exec source
+alias unalias function set unset export readonly declare local
+type command builtin hash jobs fg bg wait kill disown nohup
+which whereis whoami id uname hostname uptime free env printenv
+seq bc expr getopt getopts read mapfile shift trap let
+
+# Text editing
+vim vi nano emacs ed joe micro kakoune helix hx
+
+# Processes and system
+ps top htop btmon pgrep pkill pstree killall nice renice
+systemctl journalctl service init rc-service
+mount umount lsblk blkid fdisk parted mkfs fsck
+ip ifconfig ping ping6 traceroute mtr netstat ss lsof fuser
+curl wget ssh scp sftp rsync nc socat dig nslookup host whois
+
+# Archives and compression
+tar gzip gunzip bzip2 bunzip2 xz unxz zip unzip 7z unrar
+
+# Development
+git hg svn make cmake ninja meson gcc g++ cc clang rustc cargo
+go node npm npx yarn pnpm python python3 pip pip3 ruby gem perl
+java javac mvn gradle php composer lua luarocks dart flutter
+docker podman kubectl terraform ansible ansible-playbook
+gdb strace ltrace valgrind perf gprof
+
+# Package managers
+pacman yay paru apt apt-get dpkg dnf yum apk zypper pacman-key
+
+# Terminal multiplexers and misc
+tmux screen bash fish zsh sh dash
+chmod chown chgrp umask sudo doas su passwd
+crontab at watch yes dmesg logrotate
+sha256sum sha1sum md5sum openssl gpg gpg2 base64
+column tree neofetch fastfetch
