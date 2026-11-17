@@ -4,7 +4,7 @@ set -euo pipefail
 # Runs as root inside archlinux:base-devel.  makepkg itself runs as "builder".
 pacman -Syu --noconfirm --needed \
   python python-build python-installer python-setuptools python-wheel \
-  python-av python-numpy pyside6 ffmpeg git
+  python-av python-numpy pyside6 ffmpeg fish git
 
 useradd -m builder
 
