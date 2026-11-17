@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=hashcheck
+Comment=Compute and verify file hashes
+Exec=hashcheck
+Terminal=false
+Categories=Utility;

@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=fileforge
+Comment=Minimal file-converter GUI
+Exec=fileforge
+Icon=utilities-system-monitor
+Terminal=false
+Categories=Utility;

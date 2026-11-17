@@ -1,0 +1,21 @@
+# Maintainer: DogeTmV
+pkgname=hashcheck
+pkgver=0.1.0
+pkgrel=1
+pkgdesc='Minimal GUI to compute and verify file hashes'
+arch=('x86_64' 'aarch64')
+url='https://github.com/DogeTmV/arch-packages'
+license=('MIT')
+depends=('python' 'pyside6')
+source=("local-source.tar.gz")
+sha256sums=('SKIP')
+
+package() {
+  cd "$pkgname"
+  install -Dm755 "$pkgname" "$pkgdir/usr/bin/$pkgname"
+  install -Dm644 core.py "$pkgdir/usr/lib/$pkgname/core.py"
+  install -Dm644 gui.py "$pkgdir/usr/lib/$pkgname/gui.py"
+  install -Dm644 "$pkgname.desktop" "$pkgdir/usr/share/applications/$pkgname.desktop"
+  install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

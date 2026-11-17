@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=jsonpolish
+Comment=Format, minify and validate JSON
+Exec=jsonpolish
+Terminal=false
+Categories=Utility;

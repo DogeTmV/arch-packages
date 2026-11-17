@@ -51,6 +51,19 @@ Local services and planning:
 - [`projects/tripplan`](projects/tripplan/README.md) — offline itineraries with ICS export.
 - [`projects/printbridge`](projects/printbridge/README.md) — authenticated loopback HTTP-to-`lp` print bridge.
 
+Minimal GUI utilities (PySide6; media tools shell out to `ffmpeg`/`ffprobe` or
+`yt-dlp` via argument lists, never a shell):
+
+- [`projects/tapecut`](projects/tapecut/README.md) — one-button audio trimmer: open, set Start/Length, export.
+- [`projects/toneshift`](projects/toneshift/README.md) — speed/pitch slider using chained `atempo` filters.
+- [`projects/soundboard`](projects/soundboard/README.md) — eight click-to-play slots with right-click assign.
+- [`projects/fileforge`](projects/fileforge/README.md) — small text/image/audio file converter.
+- [`projects/ytdock`](projects/ytdock/README.md) — yt-dlp GUI with best/video/audio/small presets and a live log.
+- [`projects/cutframe`](projects/cutframe/README.md) — video editor with Cut and Crop toggle panels.
+- [`projects/hashcheck`](projects/hashcheck/README.md) — compute and verify MD5/SHA-1/SHA-256/SHA-512 hashes.
+- [`projects/batchrename`](projects/batchrename/README.md) — pattern-based batch renamer with preview and collision checks.
+- [`projects/jsonpolish`](projects/jsonpolish/README.md) — JSON format, minify, validate, and copy.
+
 Run the whole bundled suite with `./ci/test-projects.sh --build`.
 
 A pacman repo is just a directory plus a `<name>.db` file; nothing ties it to a

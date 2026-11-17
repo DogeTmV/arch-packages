@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=cutframe
+Comment=Minimal video cut and crop GUI
+Exec=cutframe
+Icon=applications-multimedia
+Terminal=false
+Categories=AudioVideo;Video;

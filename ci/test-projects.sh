@@ -17,7 +17,13 @@ for dir in "$root"/projects/*; do
   [[ -f "$root/packages/$name/PKGBUILD" ]] || continue
   [[ -d "$dir/tests" ]] || continue
   echo "== $name =="
-  if ! (cd "$dir" && python3 -m unittest discover -s tests -v); then
+  if [[ -f "$dir/tests/run_all.sh" ]]; then
+    # Shell-only projects (for example terminal-autocorrect) use their own
+    # test harness; unittest discover reports "NO TESTS RAN" for those.
+    if ! (cd "$dir" && bash tests/run_all.sh); then
+      failed=1
+    fi
+  elif ! (cd "$dir" && QT_QPA_PLATFORM=offscreen python3 -m unittest discover -s tests -v); then
     failed=1
   fi
   if ((build)); then

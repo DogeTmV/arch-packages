@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=tapecut
+Comment=Minimal one-button audio trimmer
+Exec=tapecut
+Icon=audio-x-generic
+Terminal=false
+Categories=AudioVideo;Audio;

@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=batchrename
+Comment=Rename many files with a naming pattern
+Exec=batchrename
+Terminal=false
+Categories=Utility;

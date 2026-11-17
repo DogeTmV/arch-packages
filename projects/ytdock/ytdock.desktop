@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=ytdock
+Comment=Minimal yt-dlp download GUI
+Exec=ytdock
+Icon=applications-internet
+Terminal=false
+Categories=Network;

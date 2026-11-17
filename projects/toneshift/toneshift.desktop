@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=toneshift
+Comment=Minimal speed and pitch editor GUI
+Exec=toneshift
+Icon=audio-x-generic
+Terminal=false
+Categories=AudioVideo;Audio;
