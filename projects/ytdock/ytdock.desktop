@@ -3,6 +3,6 @@ Type=Application
 Name=ytdock
 Comment=Minimal yt-dlp download GUI
 Exec=ytdock
-Icon=applications-internet
+Icon=ytdock
 Terminal=false
 Categories=Network;

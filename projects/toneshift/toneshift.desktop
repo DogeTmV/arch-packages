@@ -3,6 +3,6 @@ Type=Application
 Name=toneshift
 Comment=Minimal speed and pitch editor GUI
 Exec=toneshift
-Icon=audio-x-generic
+Icon=toneshift
 Terminal=false
 Categories=AudioVideo;Audio;

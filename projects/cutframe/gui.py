@@ -1,4 +1,4 @@
-"""Thin PySide6 GUI for cutframe.
+"""Dark, minimal PySide6 GUI for cutframe.
 
 Qt is imported lazily inside :func:`main` / :func:`build_window` so that
 ``--help`` and ``--version`` work on a machine with no display server.
@@ -8,6 +8,7 @@ import os
 import sys
 
 import core
+import theme
 
 VERSION = core.VERSION
 USAGE = "usage: cutframe [--help | --version]"
@@ -30,28 +31,44 @@ def build_window():
     class CutframeWindow(QtWidgets.QWidget):
         def __init__(self):
             super().__init__()
+            theme.polish(self, "cutframe")
             self.source = ""
             self.process = None
             self.setWindowTitle("cutframe")
-            self.setMinimumWidth(420)
+            self.setMinimumWidth(470)
             self._build()
 
         def _build(self):
-            layout = QtWidgets.QVBoxLayout(self)
+            outer = QtWidgets.QVBoxLayout(self)
+            outer.setContentsMargins(22, 20, 22, 18)
+            outer.setSpacing(16)
+            outer.addWidget(theme.header("cutframe", "Cut, crop and export video clips"))
 
-            buttons = QtWidgets.QHBoxLayout()
-            self.open_button = QtWidgets.QPushButton("Open")
-            self.cut_button = QtWidgets.QPushButton("Cut")
-            self.crop_button = QtWidgets.QPushButton("Crop")
-            self.export_button = QtWidgets.QPushButton("Export")
-            for button in (self.open_button, self.cut_button,
-                           self.crop_button, self.export_button):
-                buttons.addWidget(button)
-            layout.addLayout(buttons)
+            source_card = theme.card("SOURCE VIDEO")
+            source_row = QtWidgets.QHBoxLayout()
+            self.open_button = theme.button("Open video", "folder")
+            self.file_label = theme.label("No video selected", "status")
+            source_row.addWidget(self.open_button)
+            source_row.addWidget(self.file_label, 1)
+            source_card.layout().addLayout(source_row)
+            outer.addWidget(source_card)
 
-            self.cut_panel = QtWidgets.QWidget()
+            edit_card = theme.card("EDIT")
+            toolbar = QtWidgets.QHBoxLayout()
+            self.cut_button = theme.button("Cut", "scissors")
+            self.crop_button = theme.button("Crop", "crop")
+            self.export_button = theme.button("Export", "export", accent=True)
+            toolbar.addWidget(self.cut_button)
+            toolbar.addWidget(self.crop_button)
+            toolbar.addStretch(1)
+            toolbar.addWidget(self.export_button)
+            edit_card.layout().addLayout(toolbar)
+
+            self.cut_panel = QtWidgets.QFrame()
+            self.cut_panel.setObjectName("panel")
             cut_layout = QtWidgets.QHBoxLayout(self.cut_panel)
-            cut_layout.setContentsMargins(0, 0, 0, 0)
+            cut_layout.setContentsMargins(14, 12, 14, 12)
+            cut_layout.setSpacing(12)
             self.start_spin = QtWidgets.QDoubleSpinBox()
             self.start_spin.setRange(0.0, 100000.0)
             self.start_spin.setDecimals(2)
@@ -61,18 +78,18 @@ def build_window():
             self.length_spin.setDecimals(2)
             self.length_spin.setValue(5.0)
             self.length_spin.setSuffix(" s")
-            self.start_label = QtWidgets.QLabel("Start")
-            self.length_label = QtWidgets.QLabel("Length")
-            cut_layout.addWidget(self.start_label)
-            cut_layout.addWidget(self.start_spin)
-            cut_layout.addWidget(self.length_label)
-            cut_layout.addWidget(self.length_spin)
+            self.start_label = theme.label("Start", "field")
+            self.length_label = theme.label("Length", "field")
+            cut_layout.addWidget(theme.field("Start", self.start_spin))
+            cut_layout.addWidget(theme.field("Length", self.length_spin))
             self.cut_panel.setVisible(False)
-            layout.addWidget(self.cut_panel)
+            edit_card.layout().addWidget(self.cut_panel)
 
-            self.crop_panel = QtWidgets.QWidget()
+            self.crop_panel = QtWidgets.QFrame()
+            self.crop_panel.setObjectName("panel")
             crop_layout = QtWidgets.QHBoxLayout(self.crop_panel)
-            crop_layout.setContentsMargins(0, 0, 0, 0)
+            crop_layout.setContentsMargins(14, 12, 14, 12)
+            crop_layout.setSpacing(10)
             self.x_spin = QtWidgets.QSpinBox()
             self.y_spin = QtWidgets.QSpinBox()
             self.w_spin = QtWidgets.QSpinBox()
@@ -85,21 +102,25 @@ def build_window():
             self.h_spin.setValue(480)
             for label, spin in (("X", self.x_spin), ("Y", self.y_spin),
                                 ("W", self.w_spin), ("H", self.h_spin)):
-                crop_layout.addWidget(QtWidgets.QLabel(label))
-                crop_layout.addWidget(spin)
+                crop_layout.addWidget(theme.field(label, spin))
             self.crop_panel.setVisible(False)
-            layout.addWidget(self.crop_panel)
+            edit_card.layout().addWidget(self.crop_panel)
+            outer.addWidget(edit_card)
 
-            self.status_label = QtWidgets.QLabel("Open a video to begin")
-            self.status_label.setWordWrap(True)
-            layout.addWidget(self.status_label)
+            self.status_label = theme.label("Open a video to begin", "status")
+            outer.addWidget(self.status_label)
+            outer.addStretch(1)
 
             self.open_button.clicked.connect(self.open_file)
-            self.cut_button.clicked.connect(
-                lambda: self.cut_panel.setVisible(not self.cut_panel.isVisible()))
-            self.crop_button.clicked.connect(
-                lambda: self.crop_panel.setVisible(not self.crop_panel.isVisible()))
+            self.cut_button.clicked.connect(self.toggle_cut)
+            self.crop_button.clicked.connect(self.toggle_crop)
             self.export_button.clicked.connect(self.export)
+
+        def toggle_cut(self):
+            self.cut_panel.setVisible(not self.cut_panel.isVisible())
+
+        def toggle_crop(self):
+            self.crop_panel.setVisible(not self.crop_panel.isVisible())
 
         def open_file(self):
             path, _ = QtWidgets.QFileDialog.getOpenFileName(
@@ -107,6 +128,7 @@ def build_window():
             if not path:
                 return
             self.source = path
+            self.file_label.setText(os.path.basename(path))
             self.status_label.setText("Probing %s…" % os.path.basename(path))
             command = core.build_probe_command(path)
             process = QtCore.QProcess(self)
@@ -182,6 +204,7 @@ def main(argv=None):
 
     args = list(sys.argv if argv is None else argv)
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(args)
+    theme.install(app)
     window = build_window()
     window.show()
     return app.exec()

@@ -1,10 +1,11 @@
-"""Thin PySide6 GUI for toneshift (speed/pitch slider)."""
+"""Dark, minimal PySide6 GUI for toneshift (speed/pitch slider)."""
 
 import argparse
 import os
 import sys
 
 import core
+import theme
 
 NAME = "toneshift"
 VERSION = core.VERSION
@@ -21,38 +22,65 @@ def build_parser():
 def create_window():
     """Build the main window; Qt is imported lazily for display-free CLI flags."""
     from PySide6.QtCore import QProcess, Qt
-    from PySide6.QtWidgets import (QFileDialog, QGridLayout, QLabel,
-                                   QPushButton, QSlider, QWidget)
+    from PySide6.QtWidgets import QFileDialog, QHBoxLayout, QSlider, QVBoxLayout, QWidget
 
     class ToneshiftWindow(QWidget):
         def __init__(self):
             super().__init__()
+            theme.polish(self, NAME)
             self.setWindowTitle(NAME)
-            self.resize(380, 185)
+            self.setMinimumWidth(430)
             self.path = ""
             self._export_process = None
             self._player_process = None
+            self._build()
 
-            self.open_button = QPushButton("Open…")
-            self.export_button = QPushButton("Export")
-            self.play_button = QPushButton("Play / Stop")
-            self.rate_label = QLabel("Speed: 1.00x")
+        def _build(self):
+            outer = QVBoxLayout(self)
+            outer.setContentsMargins(22, 20, 22, 18)
+            outer.setSpacing(16)
+            outer.addWidget(theme.header(NAME, "Shift playback speed without losing the vibe"))
+
+            source_card = theme.card("SOURCE")
+            source_row = QHBoxLayout()
+            self.open_button = theme.button("Open audio", "folder")
+            self.file_label = theme.label("No file loaded", "status")
+            source_row.addWidget(self.open_button)
+            source_row.addWidget(self.file_label, 1)
+            source_card.layout().addLayout(source_row)
+            outer.addWidget(source_card)
+
+            speed_card = theme.card("PLAYBACK SPEED")
+            self.rate_label = theme.label("Speed: 1.00x", "value")
+            self.rate_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
             self.slider = QSlider(Qt.Orientation.Horizontal)
             self.slider.setMinimum(int(core.ATEMPO_MIN * 100))
             self.slider.setMaximum(int(core.ATEMPO_MAX * 100))
             self.slider.setSingleStep(5)
             self.slider.setValue(100)
             self.slider.setToolTip("Playback speed (0.5x - 2.0x)")
-            self.status = QLabel("No file loaded")
-            self.status.setWordWrap(True)
+            speed_card.layout().addWidget(self.rate_label)
+            speed_card.layout().addWidget(self.slider)
+            hints = QHBoxLayout()
+            hints.addWidget(theme.label("0.5×", "field"))
+            hints.addStretch(1)
+            hints.addWidget(theme.label("1.0×", "field"))
+            hints.addStretch(1)
+            hints.addWidget(theme.label("2.0×", "field"))
+            speed_card.layout().addLayout(hints)
+            outer.addWidget(speed_card)
 
-            layout = QGridLayout(self)
-            layout.addWidget(self.open_button, 0, 0)
-            layout.addWidget(self.export_button, 0, 1)
-            layout.addWidget(self.rate_label, 1, 0, 1, 2)
-            layout.addWidget(self.slider, 2, 0, 1, 2)
-            layout.addWidget(self.play_button, 3, 0, 1, 2)
-            layout.addWidget(self.status, 4, 0, 1, 2)
+            actions = QHBoxLayout()
+            self.play_button = theme.button("Play / Stop", "play")
+            self.export_button = theme.button("Export audio", "export", accent=True)
+            actions.addWidget(self.play_button)
+            actions.addStretch(1)
+            actions.addWidget(self.export_button)
+            outer.addLayout(actions)
+
+            self.status = theme.label("Ready", "status")
+            outer.addWidget(self.status)
+            outer.addStretch(1)
 
             self.open_button.clicked.connect(self.choose_file)
             self.slider.valueChanged.connect(self._on_rate_changed)
@@ -76,6 +104,7 @@ def create_window():
             if not path:
                 return
             self.path = path
+            self.file_label.setText(os.path.basename(path))
             self.set_status("Loaded %s" % os.path.basename(path))
 
         def export(self):
@@ -149,6 +178,7 @@ def main(argv=None):
     build_parser().parse_args(argv)  # exits before Qt for --help/--version
     from PySide6.QtWidgets import QApplication
     app = QApplication.instance() or QApplication([])
+    theme.install(app)
     window = create_window()
     window.show()
     return app.exec()

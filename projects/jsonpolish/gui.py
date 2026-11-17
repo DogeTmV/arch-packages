@@ -1,4 +1,4 @@
-"""Thin PySide6 window for jsonpolish.
+"""Dark, minimal PySide6 window for jsonpolish.
 
 Qt is imported only when the GUI is actually launched, so --help and
 --version work on a machine with no display server.
@@ -7,6 +7,7 @@ Qt is imported only when the GUI is actually launched, so --help and
 import sys
 
 from core import JsonpolishError, format_json, minify_json, validate_json
+import theme
 
 NAME = "jsonpolish"
 VERSION = "0.1.0"
@@ -31,36 +32,45 @@ def create_window():
     class JsonpolishWindow(QtWidgets.QWidget):
         def __init__(self):
             super().__init__()
+            theme.polish(self, NAME)
             self.setWindowTitle(NAME)
-            self.resize(620, 460)
+            self.setMinimumSize(600, 440)
             self._build()
 
         def _build(self):
-            layout = QtWidgets.QVBoxLayout(self)
+            outer = QtWidgets.QVBoxLayout(self)
+            outer.setContentsMargins(22, 20, 22, 18)
+            outer.setSpacing(16)
+            outer.addWidget(theme.header(NAME, "Tidy JSON without leaving the desktop"))
 
+            editor_card = theme.card("JSON")
             self.text_edit = QtWidgets.QPlainTextEdit()
-            self.text_edit.setPlaceholderText("Paste JSON here")
-            layout.addWidget(self.text_edit)
+            self.text_edit.setPlaceholderText("Paste JSON here…")
+            font = self.text_edit.font()
+            font.setFamily("Adwaita Mono, DejaVu Sans Mono, monospace")
+            font.setPointSize(11)
+            self.text_edit.setFont(font)
+            editor_card.layout().addWidget(self.text_edit)
+            outer.addWidget(editor_card)
 
-            self.format_button = QtWidgets.QPushButton("Format")
+            actions = QtWidgets.QHBoxLayout()
+            self.format_button = theme.button("Format", "format", accent=True)
+            self.minify_button = theme.button("Minify", "minify")
+            self.copy_button = theme.button("Copy", "copy")
+            self.clear_button = theme.button("Clear", "trash", flat=True)
+            for control in (self.format_button, self.minify_button,
+                            self.copy_button, self.clear_button):
+                actions.addWidget(control)
+            actions.addStretch(1)
+            outer.addLayout(actions)
+
+            self.status_label = theme.label("Ready", "status")
+            outer.addWidget(self.status_label)
+
             self.format_button.clicked.connect(self.format_text)
-            layout.addWidget(self.format_button)
-
-            self.minify_button = QtWidgets.QPushButton("Minify")
             self.minify_button.clicked.connect(self.minify_text)
-            layout.addWidget(self.minify_button)
-
-            self.copy_button = QtWidgets.QPushButton("Copy")
             self.copy_button.clicked.connect(self.copy_text)
-            layout.addWidget(self.copy_button)
-
-            self.clear_button = QtWidgets.QPushButton("Clear")
             self.clear_button.clicked.connect(self.clear_text)
-            layout.addWidget(self.clear_button)
-
-            self.status_label = QtWidgets.QLabel("Ready")
-            self.status_label.setWordWrap(True)
-            layout.addWidget(self.status_label)
 
         def show_error(self, message):
             self.status_label.setText(message)
@@ -109,6 +119,7 @@ def main(argv=None):
     from PySide6.QtWidgets import QApplication
 
     app = QApplication.instance() or QApplication(argv)
+    theme.install(app)
     window = create_window()
     window.show()
     return app.exec()

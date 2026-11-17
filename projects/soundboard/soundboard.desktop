@@ -3,6 +3,6 @@ Type=Application
 Name=soundboard
 Comment=Minimal eight-slot click-to-play soundboard
 Exec=soundboard
-Icon=audio-x-generic
+Icon=soundboard
 Terminal=false
 Categories=AudioVideo;Audio;

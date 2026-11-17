@@ -37,3 +37,8 @@ QT_QPA_PLATFORM=offscreen python3 -m unittest discover -s tests -v
 ## License
 
 MIT — see [LICENSE](LICENSE).
+
+## Appearance
+
+The interface uses a shared dark theme with drawn vector icons (no external
+icon theme required). A matching branded icon is installed for desktop menus.

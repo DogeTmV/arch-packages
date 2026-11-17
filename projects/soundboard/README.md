@@ -64,3 +64,8 @@ offscreen Qt platform for the GUI smoke test.
 
 MIT — see [LICENSE](LICENSE). Not affiliated with any hardware maker;
 **original minimal utility**, no upstream code/assets.
+
+## Appearance
+
+The interface uses a shared dark theme with drawn vector icons (no external
+icon theme required). A matching branded icon is installed for desktop menus.

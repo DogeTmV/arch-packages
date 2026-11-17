@@ -3,5 +3,6 @@ Type=Application
 Name=hashcheck
 Comment=Compute and verify file hashes
 Exec=hashcheck
+Icon=hashcheck
 Terminal=false
 Categories=Utility;

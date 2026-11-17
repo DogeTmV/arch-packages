@@ -1,4 +1,4 @@
-"""Thin PySide6 GUI for fileforge.
+"""Dark, minimal PySide6 GUI for fileforge.
 
 Qt is imported lazily inside :func:`main` / :func:`build_window` so that
 ``--help`` and ``--version`` work on a machine with no display server.
@@ -8,6 +8,7 @@ import os
 import sys
 
 import core
+import theme
 
 VERSION = core.VERSION
 USAGE = "usage: fileforge [--help | --version]"
@@ -30,32 +31,40 @@ def build_window():
     class FileforgeWindow(QtWidgets.QWidget):
         def __init__(self):
             super().__init__()
+            theme.polish(self, "fileforge")
             self.source = ""
             self.process = None
             self.setWindowTitle("fileforge")
-            self.setMinimumWidth(420)
+            self.setMinimumWidth(450)
             self._build()
 
         def _build(self):
-            layout = QtWidgets.QVBoxLayout(self)
+            outer = QtWidgets.QVBoxLayout(self)
+            outer.setContentsMargins(22, 20, 22, 18)
+            outer.setSpacing(16)
+            outer.addWidget(theme.header("fileforge", "Convert text, images and audio"))
 
-            top = QtWidgets.QHBoxLayout()
-            self.open_button = QtWidgets.QPushButton("Open…")
-            self.path_label = QtWidgets.QLabel("No file selected")
-            self.path_label.setWordWrap(True)
-            top.addWidget(self.open_button)
-            top.addWidget(self.path_label, 1)
-            layout.addLayout(top)
+            source_card = theme.card("INPUT FILE")
+            source_row = QtWidgets.QHBoxLayout()
+            self.open_button = theme.button("Choose file", "folder")
+            self.path_label = theme.label("No file selected", "status")
+            source_row.addWidget(self.open_button)
+            source_row.addWidget(self.path_label, 1)
+            source_card.layout().addLayout(source_row)
+            outer.addWidget(source_card)
 
+            target_card = theme.card("OUTPUT FORMAT")
             self.format_combo = QtWidgets.QComboBox()
-            layout.addWidget(self.format_combo)
+            convert_row = QtWidgets.QHBoxLayout()
+            convert_row.addWidget(theme.field("Convert to", self.format_combo), 1)
+            self.convert_button = theme.button("Convert", "convert", accent=True)
+            convert_row.addWidget(self.convert_button)
+            target_card.layout().addLayout(convert_row)
+            outer.addWidget(target_card)
 
-            self.convert_button = QtWidgets.QPushButton("Convert")
-            layout.addWidget(self.convert_button)
-
-            self.status_label = QtWidgets.QLabel("Ready")
-            self.status_label.setWordWrap(True)
-            layout.addWidget(self.status_label)
+            self.status_label = theme.label("Ready", "status")
+            outer.addWidget(self.status_label)
+            outer.addStretch(1)
 
             self.open_button.clicked.connect(self.choose_file)
             self.convert_button.clicked.connect(self.convert)
@@ -129,6 +138,7 @@ def main(argv=None):
 
     args = list(sys.argv if argv is None else argv)
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(args)
+    theme.install(app)
     window = build_window()
     window.show()
     return app.exec()

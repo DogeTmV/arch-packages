@@ -1,10 +1,11 @@
-"""Thin PySide6 GUI for soundboard: eight click-to-play slots."""
+"""Dark, minimal PySide6 GUI for soundboard: eight click-to-play slots."""
 
 import argparse
 import os
 import sys
 
 import core
+import theme
 
 NAME = "soundboard"
 VERSION = core.VERSION
@@ -24,44 +25,65 @@ def build_parser():
 def create_window(player=None):
     """Build the main window; Qt is imported lazily for display-free CLI flags."""
     from PySide6.QtCore import QProcess, Qt
-    from PySide6.QtWidgets import (QFileDialog, QGridLayout, QLabel,
-                                   QPushButton, QWidget)
+    from PySide6.QtWidgets import (QButtonGroup, QFileDialog, QGridLayout,
+                                   QHBoxLayout, QVBoxLayout, QWidget)
 
     chosen_player = core.resolve_player(player)
 
     class SoundboardWindow(QWidget):
         def __init__(self, player_command):
             super().__init__()
+            theme.polish(self, NAME)
             self.setWindowTitle(NAME)
-            self.resize(520, 270)
+            self.setMinimumWidth(480)
             self.player = player_command
             self.slots = [None] * core.SLOT_COUNT
             self.buttons = []
             self._process = None
             self._output = ""
+            self._build()
 
-            self.stop_button = QPushButton("Stop")
-            self.status = QLabel("Click a slot to play; right-click to assign")
-            self.status.setWordWrap(True)
+        def _build(self):
+            outer = QVBoxLayout(self)
+            outer.setContentsMargins(22, 20, 22, 18)
+            outer.setSpacing(16)
+            outer.addWidget(theme.header(NAME, "Eight sounds, one click each"))
 
-            layout = QGridLayout(self)
+            board = theme.card("SLOTS  ·  RIGHT-CLICK TO ASSIGN")
+            grid = QGridLayout()
+            grid.setSpacing(10)
+            self.slot_group = QButtonGroup(self)
+            self.slot_group.setExclusive(False)
             for index in range(core.SLOT_COUNT):
-                button = QPushButton(str(index + 1))
-                button.setMinimumSize(105, 70)
+                button = theme.button(str(index + 1), "play")
+                button.setObjectName("slot")
                 button.setToolTip("Slot %d: empty (right-click to assign)" % (index + 1))
                 button.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-                button.clicked.connect(
-                    lambda _checked, idx=index: self.play_slot(idx))
-                button.customContextMenuRequested.connect(
-                    lambda _pos, idx=index: self.assign_slot(idx))
+                self.slot_group.addButton(button, index)
+                button.customContextMenuRequested.connect(self.assign_slot_from_menu)
                 self.buttons.append(button)
-                layout.addWidget(button, index // 4, index % 4)
-            layout.addWidget(self.stop_button, 2, 0, 1, 2)
-            layout.addWidget(self.status, 2, 2, 1, 2)
+                grid.addWidget(button, index // 4, index % 4)
+            self.slot_group.idClicked.connect(self.play_slot)
+            board.layout().addLayout(grid)
+            outer.addWidget(board)
+
+            footer = QHBoxLayout()
+            self.status = theme.label("Click a slot to play; right-click to assign", "status")
+            self.stop_button = theme.button("Stop", "stop")
+            footer.addWidget(self.status, 1)
+            footer.addWidget(self.stop_button)
+            outer.addLayout(footer)
+            outer.addStretch(1)
+
             self.stop_button.clicked.connect(self.stop)
 
         def set_status(self, text):
             self.status.setText(text)
+
+        def assign_slot_from_menu(self, _position):
+            button = self.sender()
+            if button in self.buttons:
+                self.assign_slot(self.buttons.index(button))
 
         def assign_slot(self, index):
             path, _selected = QFileDialog.getOpenFileName(
@@ -71,6 +93,8 @@ def create_window(player=None):
                 return
             self.slots[index] = path
             self.buttons[index].setToolTip("Slot %d: %s" % (index + 1, path))
+            self.buttons[index].setProperty("assigned", True)
+            self.buttons[index].style().polish(self.buttons[index])
             self.set_status("Slot %d assigned: %s" % (index + 1, os.path.basename(path)))
 
         def play_slot(self, index):
@@ -123,6 +147,7 @@ def main(argv=None):
     args = build_parser().parse_args(argv)  # exits before Qt for --help/--version
     from PySide6.QtWidgets import QApplication
     app = QApplication.instance() or QApplication([])
+    theme.install(app)
     window = create_window(player=args.player)
     window.show()
     return app.exec()

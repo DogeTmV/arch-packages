@@ -51,8 +51,9 @@ Local services and planning:
 - [`projects/tripplan`](projects/tripplan/README.md) — offline itineraries with ICS export.
 - [`projects/printbridge`](projects/printbridge/README.md) — authenticated loopback HTTP-to-`lp` print bridge.
 
-Minimal GUI utilities (PySide6; media tools shell out to `ffmpeg`/`ffprobe` or
-`yt-dlp` via argument lists, never a shell):
+Minimal GUI utilities (PySide6 with a shared dark theme and drawn vector
+icons; media tools shell out to `ffmpeg`/`ffprobe` or `yt-dlp` via argument
+lists, never a shell):
 
 - [`projects/tapecut`](projects/tapecut/README.md) — one-button audio trimmer: open, set Start/Length, export.
 - [`projects/toneshift`](projects/toneshift/README.md) — speed/pitch slider using chained `atempo` filters.

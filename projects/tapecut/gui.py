@@ -1,10 +1,11 @@
-"""Thin PySide6 GUI for tapecut (one-button tape deck styling)."""
+"""Dark, minimal PySide6 GUI for tapecut (one-button tape deck styling)."""
 
 import argparse
 import os
 import sys
 
 import core
+import theme
 
 NAME = "tapecut"
 VERSION = core.VERSION
@@ -27,21 +28,36 @@ def create_window():
     """
     from PySide6.QtCore import QProcess
     from PySide6.QtWidgets import (QDoubleSpinBox, QFileDialog, QHBoxLayout,
-                                   QLabel, QPushButton, QVBoxLayout, QWidget)
+                                   QVBoxLayout, QWidget)
 
     class TapecutWindow(QWidget):
         def __init__(self):
             super().__init__()
+            theme.polish(self, NAME)
             self.setWindowTitle(NAME)
-            self.resize(420, 175)
+            self.setMinimumWidth(430)
             self.path = ""
             self._probe_process = None
             self._export_process = None
             self._player_process = None
+            self._build()
 
-            self.open_button = QPushButton("Open…")
-            self.export_button = QPushButton("Export")
-            self.play_button = QPushButton("Play / Stop")
+        def _build(self):
+            outer = QVBoxLayout(self)
+            outer.setContentsMargins(22, 20, 22, 18)
+            outer.setSpacing(16)
+            outer.addWidget(theme.header(NAME, "Trim a clean clip from any audio file"))
+
+            source_card = theme.card("SOURCE")
+            source_row = QHBoxLayout()
+            self.open_button = theme.button("Open audio", "folder")
+            self.file_label = theme.label("No file loaded", "status")
+            source_row.addWidget(self.open_button)
+            source_row.addWidget(self.file_label, 1)
+            source_card.layout().addLayout(source_row)
+            outer.addWidget(source_card)
+
+            trim_card = theme.card("SELECTION")
             self.start_spin = QDoubleSpinBox()
             self.start_spin.setPrefix("Start ")
             self.start_spin.setSuffix(" s")
@@ -56,20 +72,23 @@ def create_window():
             self.length_spin.setMaximum(100000.0)
             self.length_spin.setValue(10.0)
             self.length_spin.setToolTip("Length of the exported clip in seconds")
-            self.status = QLabel("No file loaded")
-            self.status.setWordWrap(True)
+            spins = QHBoxLayout()
+            spins.addWidget(theme.field("Start time", self.start_spin))
+            spins.addWidget(theme.field("Length", self.length_spin))
+            trim_card.layout().addLayout(spins)
+            outer.addWidget(trim_card)
 
-            open_row = QHBoxLayout()
-            open_row.addWidget(self.open_button)
-            open_row.addWidget(self.export_button)
-            time_row = QHBoxLayout()
-            time_row.addWidget(self.start_spin)
-            time_row.addWidget(self.length_spin)
-            layout = QVBoxLayout(self)
-            layout.addLayout(open_row)
-            layout.addLayout(time_row)
-            layout.addWidget(self.play_button)
-            layout.addWidget(self.status)
+            actions = QHBoxLayout()
+            self.play_button = theme.button("Play / Stop", "play")
+            self.export_button = theme.button("Export clip", "export", accent=True)
+            actions.addWidget(self.play_button)
+            actions.addStretch(1)
+            actions.addWidget(self.export_button)
+            outer.addLayout(actions)
+
+            self.status = theme.label("No file loaded", "status")
+            outer.addWidget(self.status)
+            outer.addStretch(1)
 
             self.open_button.clicked.connect(self.choose_file)
             self.export_button.clicked.connect(self.export)
@@ -85,6 +104,7 @@ def create_window():
             if not path:
                 return
             self.path = path
+            self.file_label.setText(os.path.basename(path))
             self.set_status("Reading %s…" % os.path.basename(path))
             command = core.build_probe_command(path)
             self._probe_process = QProcess(self)
@@ -180,6 +200,7 @@ def main(argv=None):
     build_parser().parse_args(argv)  # exits before Qt for --help/--version
     from PySide6.QtWidgets import QApplication
     app = QApplication.instance() or QApplication([])
+    theme.install(app)
     window = create_window()
     window.show()
     return app.exec()

@@ -1,4 +1,4 @@
-"""Thin PySide6 GUI for ytdock.
+"""Dark, minimal PySide6 GUI for ytdock.
 
 Qt is imported lazily inside :func:`main` / :func:`build_window` so that
 ``--help`` and ``--version`` work on a machine with no display server.
@@ -9,6 +9,7 @@ import shlex
 import sys
 
 import core
+import theme
 
 VERSION = core.VERSION
 USAGE = "usage: ytdock [--help | --version]"
@@ -31,6 +32,7 @@ def build_window():
     class YtdockWindow(QtWidgets.QWidget):
         def __init__(self):
             super().__init__()
+            theme.polish(self, "ytdock")
             self.outdir = os.path.expanduser("~")
             self.process = None
             self.setWindowTitle("ytdock")
@@ -38,30 +40,45 @@ def build_window():
             self._build()
 
         def _build(self):
-            layout = QtWidgets.QVBoxLayout(self)
+            outer = QtWidgets.QVBoxLayout(self)
+            outer.setContentsMargins(22, 20, 22, 18)
+            outer.setSpacing(16)
+            outer.addWidget(theme.header("ytdock", "A quiet dock for yt-dlp downloads"))
 
+            download_card = theme.card("DOWNLOAD")
             self.url_edit = QtWidgets.QLineEdit()
             self.url_edit.setPlaceholderText("https://…")
-            layout.addWidget(self.url_edit)
-
             self.mode_combo = QtWidgets.QComboBox()
             self.mode_combo.addItems(core.MODES)
-            layout.addWidget(self.mode_combo)
+            download_card.layout().addWidget(theme.field("Video URL", self.url_edit))
+            download_card.layout().addWidget(theme.field("Preset", self.mode_combo))
 
-            self.folder_button = QtWidgets.QPushButton("Choose Folder…")
-            layout.addWidget(self.folder_button)
+            folder_row = QtWidgets.QHBoxLayout()
+            self.folder_button = theme.button("Choose folder", "folder")
+            self.folder_label = theme.label(self.outdir, "status")
+            folder_row.addWidget(self.folder_button)
+            folder_row.addWidget(self.folder_label, 1)
+            download_card.layout().addLayout(folder_row)
+            outer.addWidget(download_card)
 
-            buttons = QtWidgets.QHBoxLayout()
-            self.download_button = QtWidgets.QPushButton("Download")
-            self.cancel_button = QtWidgets.QPushButton("Cancel")
-            buttons.addWidget(self.download_button)
-            buttons.addWidget(self.cancel_button)
-            layout.addLayout(buttons)
+            actions = QtWidgets.QHBoxLayout()
+            self.cancel_button = theme.button("Cancel", "cancel")
+            self.download_button = theme.button("Download", "download", accent=True)
+            actions.addWidget(self.cancel_button)
+            actions.addStretch(1)
+            actions.addWidget(self.download_button)
+            outer.addLayout(actions)
 
+            log_card = theme.card("ACTIVITY")
             self.log_pane = QtWidgets.QTextEdit()
             self.log_pane.setReadOnly(True)
-            self.log_pane.setMinimumHeight(180)
-            layout.addWidget(self.log_pane)
+            self.log_pane.setMinimumHeight(170)
+            font = self.log_pane.font()
+            font.setFamily("Adwaita Mono, DejaVu Sans Mono, monospace")
+            font.setPointSize(10)
+            self.log_pane.setFont(font)
+            log_card.layout().addWidget(self.log_pane)
+            outer.addWidget(log_card)
 
             self.folder_button.clicked.connect(self.choose_folder)
             self.download_button.clicked.connect(self.download)
@@ -75,6 +92,7 @@ def build_window():
                 self, "Choose output folder", self.outdir)
             if folder:
                 self.outdir = folder
+                self.folder_label.setText(folder)
                 self._log("Output folder: %s" % folder)
 
         def download(self):
@@ -131,6 +149,7 @@ def main(argv=None):
 
     args = list(sys.argv if argv is None else argv)
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(args)
+    theme.install(app)
     window = build_window()
     window.show()
     return app.exec()

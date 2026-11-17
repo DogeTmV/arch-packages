@@ -43,3 +43,8 @@ Tests use only temporary files and need no network access.
 ## License
 
 MIT — see [LICENSE](LICENSE).
+
+## Appearance
+
+The interface uses a shared dark theme with drawn vector icons (no external
+icon theme required). A matching branded icon is installed for desktop menus.

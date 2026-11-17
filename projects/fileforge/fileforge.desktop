@@ -3,6 +3,6 @@ Type=Application
 Name=fileforge
 Comment=Minimal file-converter GUI
 Exec=fileforge
-Icon=utilities-system-monitor
+Icon=fileforge
 Terminal=false
 Categories=Utility;

@@ -1,4 +1,4 @@
-"""Thin PySide6 window for hashcheck.
+"""Dark, minimal PySide6 window for hashcheck.
 
 Qt is imported only when the GUI is actually launched, so --help and
 --version work on a machine with no display server.
@@ -7,6 +7,7 @@ Qt is imported only when the GUI is actually launched, so --help and
 import sys
 
 from core import ALGOS, HashcheckError, hash_file, verify as hashes_match
+import theme
 
 NAME = "hashcheck"
 VERSION = "0.1.0"
@@ -31,46 +32,61 @@ def create_window():
     class HashcheckWindow(QtWidgets.QWidget):
         def __init__(self):
             super().__init__()
+            theme.polish(self, NAME)
             self.current_hash = ""
             self.setWindowTitle(NAME)
-            self.setMinimumWidth(420)
+            self.setMinimumWidth(430)
             self._build()
 
         def _build(self):
-            layout = QtWidgets.QVBoxLayout(self)
+            outer = QtWidgets.QVBoxLayout(self)
+            outer.setContentsMargins(22, 20, 22, 18)
+            outer.setSpacing(16)
+            outer.addWidget(theme.header(NAME, "Compute and verify file fingerprints"))
 
-            self.choose_button = QtWidgets.QPushButton("Choose File")
-            self.choose_button.clicked.connect(self.choose_file)
-            layout.addWidget(self.choose_button)
+            source_card = theme.card("SOURCE FILE")
+            source_row = QtWidgets.QHBoxLayout()
+            self.choose_button = theme.button("Choose file", "folder")
+            self.path_label = theme.label("No file chosen", "status")
+            source_row.addWidget(self.choose_button)
+            source_row.addWidget(self.path_label, 1)
+            source_card.layout().addLayout(source_row)
+            outer.addWidget(source_card)
 
-            self.path_label = QtWidgets.QLabel("No file chosen")
-            self.path_label.setWordWrap(True)
-            layout.addWidget(self.path_label)
-
+            hash_card = theme.card("DIGEST")
             self.algo_combo = QtWidgets.QComboBox()
             self.algo_combo.addItems(ALGOS)
-            layout.addWidget(self.algo_combo)
+            compute_row = QtWidgets.QHBoxLayout()
+            compute_row.addWidget(theme.field("Algorithm", self.algo_combo), 1)
+            self.compute_button = theme.button("Compute", "calc", accent=True)
+            compute_row.addWidget(self.compute_button)
+            hash_card.layout().addLayout(compute_row)
+            outer.addWidget(hash_card)
 
-            self.compute_button = QtWidgets.QPushButton("Compute")
-            self.compute_button.clicked.connect(self.compute)
-            layout.addWidget(self.compute_button)
-
+            verify_card = theme.card("COMPARE")
             self.expected_edit = QtWidgets.QLineEdit()
-            self.expected_edit.setPlaceholderText("Expected hash")
-            layout.addWidget(self.expected_edit)
+            self.expected_edit.setPlaceholderText("Paste the expected hash…")
+            verify_row = QtWidgets.QHBoxLayout()
+            verify_row.addWidget(theme.field("Expected value", self.expected_edit), 1)
+            self.verify_button = theme.button("Verify", "check")
+            verify_row.addWidget(self.verify_button)
+            verify_card.layout().addLayout(verify_row)
+            outer.addWidget(verify_card)
 
-            self.verify_button = QtWidgets.QPushButton("Verify")
+            self.result_label = theme.label("Awaiting a file", "value")
+            from PySide6.QtCore import Qt
+            self.result_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            outer.addWidget(self.result_label)
+            outer.addStretch(1)
+
+            self.choose_button.clicked.connect(self.choose_file)
+            self.compute_button.clicked.connect(self.compute)
             self.verify_button.clicked.connect(self.verify)
-            layout.addWidget(self.verify_button)
-
-            self.result_label = QtWidgets.QLabel("")
-            self.result_label.setWordWrap(True)
-            layout.addWidget(self.result_label)
 
         def set_path(self, path):
             self.path_label.setText(path)
             self.current_hash = ""
-            self.result_label.setText("")
+            self.result_label.setText("Awaiting a file")
 
         def choose_file(self):
             path, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Choose File")
@@ -112,6 +128,7 @@ def main(argv=None):
     from PySide6.QtWidgets import QApplication
 
     app = QApplication.instance() or QApplication(argv)
+    theme.install(app)
     window = create_window()
     window.show()
     return app.exec()

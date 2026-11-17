@@ -3,6 +3,6 @@ Type=Application
 Name=tapecut
 Comment=Minimal one-button audio trimmer
 Exec=tapecut
-Icon=audio-x-generic
+Icon=tapecut
 Terminal=false
 Categories=AudioVideo;Audio;

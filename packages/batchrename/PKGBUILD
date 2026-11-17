@@ -6,7 +6,7 @@ pkgdesc='Minimal GUI batch renamer with pattern preview'
 arch=('x86_64' 'aarch64')
 url='https://github.com/DogeTmV/arch-packages'
 license=('MIT')
-depends=('python' 'pyside6')
+depends=('python' 'pyside6' 'qt6-svg')
 source=("local-source.tar.gz")
 sha256sums=('SKIP')
 
@@ -15,7 +15,9 @@ package() {
   install -Dm755 "$pkgname" "$pkgdir/usr/bin/$pkgname"
   install -Dm644 core.py "$pkgdir/usr/lib/$pkgname/core.py"
   install -Dm644 gui.py "$pkgdir/usr/lib/$pkgname/gui.py"
+  install -Dm644 theme.py "$pkgdir/usr/lib/$pkgname/theme.py"
   install -Dm644 "$pkgname.desktop" "$pkgdir/usr/share/applications/$pkgname.desktop"
+  install -Dm644 icons/$pkgname.svg "$pkgdir/usr/share/icons/hicolor/scalable/apps/$pkgname.svg"
   install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
   install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
 }

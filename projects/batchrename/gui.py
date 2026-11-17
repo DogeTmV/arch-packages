@@ -1,4 +1,4 @@
-"""Thin PySide6 window for batchrename.
+"""Dark, minimal PySide6 window for batchrename.
 
 Qt is imported only when the GUI is actually launched, so --help and
 --version work on a machine with no display server.
@@ -8,6 +8,7 @@ import os
 import sys
 
 from core import BatchrenameError, apply_plan, build_plan
+import theme
 
 NAME = "batchrename"
 VERSION = "0.1.0"
@@ -32,46 +33,63 @@ def create_window():
     class BatchrenameWindow(QtWidgets.QWidget):
         def __init__(self):
             super().__init__()
+            theme.polish(self, NAME)
             self.paths = []
             self.setWindowTitle(NAME)
-            self.setMinimumWidth(520)
+            self.setMinimumWidth(540)
             self._build()
 
         def _build(self):
-            layout = QtWidgets.QVBoxLayout(self)
+            outer = QtWidgets.QVBoxLayout(self)
+            outer.setContentsMargins(22, 20, 22, 18)
+            outer.setSpacing(16)
+            outer.addWidget(theme.header(NAME, "Rename a whole folder in one pass"))
 
-            self.add_button = QtWidgets.QPushButton("Add Files")
-            self.add_button.clicked.connect(self.add_files)
-            layout.addWidget(self.add_button)
+            files_card = theme.card("FILES")
+            file_row = QtWidgets.QHBoxLayout()
+            self.add_button = theme.button("Add files", "add")
+            self.file_label = theme.label("No files selected", "status")
+            file_row.addWidget(self.add_button)
+            file_row.addWidget(self.file_label, 1)
+            files_card.layout().addLayout(file_row)
+            outer.addWidget(files_card)
 
+            pattern_card = theme.card("NAMING PATTERN")
             self.pattern_edit = QtWidgets.QLineEdit("{name}_{nn}")
             self.pattern_edit.setPlaceholderText(
-                "Pattern: {name}, {n}, {nn}, {ext}"
+                "Tokens: {name}, {n}, {nn}, {ext}"
             )
-            layout.addWidget(self.pattern_edit)
-
             self.start_spin = QtWidgets.QSpinBox()
             self.start_spin.setRange(1, 999999)
             self.start_spin.setValue(1)
-            layout.addWidget(self.start_spin)
+            pattern_row = QtWidgets.QHBoxLayout()
+            pattern_row.addWidget(theme.field("Pattern", self.pattern_edit), 1)
+            pattern_row.addWidget(theme.field("Start at", self.start_spin))
+            pattern_card.layout().addLayout(pattern_row)
+            self.preview_button = theme.button("Preview", "eye")
+            pattern_card.layout().addWidget(self.preview_button)
+            outer.addWidget(pattern_card)
 
-            self.preview_button = QtWidgets.QPushButton("Preview")
-            self.preview_button.clicked.connect(self.preview)
-            layout.addWidget(self.preview_button)
-
+            preview_card = theme.card("PREVIEW")
             self.preview_list = QtWidgets.QListWidget()
-            layout.addWidget(self.preview_list)
+            self.preview_list.setMinimumHeight(130)
+            preview_card.layout().addWidget(self.preview_list)
+            outer.addWidget(preview_card)
 
-            self.rename_button = QtWidgets.QPushButton("Rename")
+            actions = QtWidgets.QHBoxLayout()
+            self.status_label = theme.label("No files selected", "status")
+            self.rename_button = theme.button("Rename files", "pencil", accent=True)
+            actions.addWidget(self.status_label, 1)
+            actions.addWidget(self.rename_button)
+            outer.addLayout(actions)
+
+            self.add_button.clicked.connect(self.add_files)
+            self.preview_button.clicked.connect(self.preview)
             self.rename_button.clicked.connect(self.rename)
-            layout.addWidget(self.rename_button)
-
-            self.status_label = QtWidgets.QLabel("No files selected")
-            self.status_label.setWordWrap(True)
-            layout.addWidget(self.status_label)
 
         def set_paths(self, paths):
             self.paths = [os.fspath(path) for path in paths]
+            self.file_label.setText("%d file(s) in the queue" % len(self.paths))
             self.preview_list.clear()
             self.status_label.setText("%d file(s) selected" % len(self.paths))
 
@@ -129,6 +147,7 @@ def main(argv=None):
     from PySide6.QtWidgets import QApplication
 
     app = QApplication.instance() or QApplication(argv)
+    theme.install(app)
     window = create_window()
     window.show()
     return app.exec()
