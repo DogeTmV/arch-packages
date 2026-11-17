@@ -1,0 +1,44 @@
+# Maintainer: DogeTmV
+pkgname=terminal-autocorrect
+pkgver=2.1.0
+pkgrel=1
+pkgdesc='Conservative fish command typo correction with recent-command cache and system command discovery'
+arch=('any')
+url='https://github.com/DogeTmV/arch-packages'
+license=('MIT')
+depends=('bash' 'fish' 'coreutils' 'findutils' 'util-linux')
+source=("local-source.tar.gz")
+sha256sums=('SKIP')
+
+package() {
+  cd "$pkgname"
+
+  _sharedir="$pkgdir/usr/share/$pkgname"
+
+  install -Dm755 autocorrect.sh "$_sharedir/autocorrect.sh"
+  install -Dm644 fish_integration.fish "$_sharedir/fish_integration.fish"
+  install -Dm644 install.sh "$_sharedir/install.sh"
+  install -Dm644 install.fish "$_sharedir/install.fish"
+  install -Dm644 uninstall.sh "$_sharedir/uninstall.sh"
+  install -Dm644 Makefile "$_sharedir/Makefile"
+  install -dm755 "$_sharedir/lib"
+  install -m644 lib/*.sh "$_sharedir/lib/"
+  install -dm755 "$_sharedir/share"
+  install -m644 share/* "$_sharedir/share/"
+
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+  for doc in README.md TUTORIAL.md ARCHITECTURE.md CHANGELOG.md; do
+    install -Dm644 "$doc" "$pkgdir/usr/share/doc/$pkgname/$doc"
+  done
+
+  # Fish loads /etc/fish/conf.d/*.fish for every user, so the hooks are active
+  # without each user having to run the project's own install.sh.
+  printf 'source /usr/share/%s/fish_integration.fish\n' "$pkgname" \
+    > "$srcdir/.ac-loader.fish"
+  install -Dm644 "$srcdir/.ac-loader.fish" "$pkgdir/etc/fish/conf.d/autocorrect.fish"
+
+  # Entry point for the human-facing commands (version, cache, system, ...).
+  printf '#!/usr/bin/env bash\nexec bash /usr/share/%s/autocorrect.sh "$@"\n' "$pkgname" \
+    > "$srcdir/.ac-cli"
+  install -Dm755 "$srcdir/.ac-cli" "$pkgdir/usr/bin/terminal-autocorrect"
+}
