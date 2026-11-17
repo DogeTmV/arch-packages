@@ -1,0 +1,107 @@
+name: Publish shared pacman repository
+
+# One Pages site, one repo database, every project packages.
+# Add a new PKGBUILD under packages/<name>/ and push to main; the changed
+# packages are built and added to public/x86_64 automatically.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'packages/**'
+      - 'ci/**'
+      - '.github/workflows/publish.yml'
+  workflow_dispatch:
+    inputs:
+      packages:
+        description: 'Comma-separated package names, or all / none'
+        required: false
+        default: 'all'
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+concurrency:
+  group: shared-pacman-repo
+  cancel-in-progress: false
+
+env:
+  REPO_DB: dogetmv
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Select packages
+        id: select
+        env:
+          INPUT_PACKAGES: ${{ inputs.packages }}
+          BEFORE: ${{ github.event.before }}
+        run: |
+          if [ -n "$INPUT_PACKAGES" ]; then
+            echo "packages=$INPUT_PACKAGES" >> "$GITHUB_OUTPUT"
+          elif [ "$BEFORE" = "0000000000000000000000000000000000000000" ]; then
+            echo "packages=all" >> "$GITHUB_OUTPUT"
+          else
+            pkgs=$(git diff --name-only "$BEFORE" HEAD -- packages | cut -d/ -f2 | sort -u | paste -sd, -)
+            echo "packages=${pkgs:-none}" >> "$GITHUB_OUTPUT"
+          fi
+          echo "Selected: $(cat "$GITHUB_OUTPUT")"
+
+      - name: Build packages and update repo database
+        env:
+          PACKAGES: ${{ steps.select.outputs.packages }}
+        run: |
+          chmod +x ci/container-entry.sh ci/build-packages.sh
+          docker run --rm \
+            -e PACKAGES \
+            -e REPO_DB \
+            -v "$PWD":/work -w /work \
+            archlinux:base-devel \
+            /work/ci/container-entry.sh
+
+      - name: Sync staged repo into public/
+        run: |
+          mkdir -p public/x86_64
+          rsync -a --delete .stage/x86_64/ public/x86_64/
+          ls -lh public/x86_64
+
+      - name: Commit published repo files
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add public
+          if ! git diff --cached --quiet; then
+            git commit -m "Publish packages to shared repo"
+            git push
+          else
+            echo "No repository changes to commit"
+          fi
+
+      - name: Print client configuration
+        run: |
+          echo "Add this to /etc/pacman.conf:"
+          echo "[${REPO_DB}]"
+          echo "SigLevel = Optional TrustAll"
+          echo "Server = https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/\$arch"
+
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: public
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

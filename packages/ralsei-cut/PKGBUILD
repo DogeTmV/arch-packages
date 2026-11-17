@@ -1,0 +1,28 @@
+# Maintainer: DogeTmV
+# This package tracks the exact source commit that produced the published
+# 1.0.0 binary.  For future releases, switch source=() to a version tag URL
+# and bump pkgver, e.g.
+#   source=("$pkgname-$pkgver.tar.gz::https://github.com/DogeTmV/ralsei-cut/archive/refs/tags/v$pkgver.tar.gz")
+pkgname=ralsei-cut
+pkgver=1.0.0
+pkgrel=1
+pkgdesc='Lean FFmpeg-powered multitrack video and audio cut editor'
+arch=('x86_64' 'aarch64')
+url='https://github.com/DogeTmV/ralsei-cut'
+license=('GPL-3.0-only')
+depends=('python' 'pyside6' 'python-av' 'python-numpy' 'ffmpeg')
+makedepends=('python-build' 'python-installer' 'python-setuptools' 'python-wheel')
+_commit=a52bebdef00ac9b11c4df593d04606c7641aff13
+source=("$pkgname-$_commit.tar.gz::https://github.com/DogeTmV/ralsei-cut/archive/$_commit.tar.gz")
+sha256sums=('b04d6a02596fa1129cc7c7aebee9de439633d47fd01b0a8556f45d0647a2bb36')
+
+build() {
+  cd "ralsei-cut-$_commit"
+  python -m build --wheel --no-isolation
+}
+
+package() {
+  cd "ralsei-cut-$_commit"
+  python -m installer --destdir="$pkgdir" dist/*.whl
+  install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
+}

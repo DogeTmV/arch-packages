@@ -1,0 +1,14 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>DogeTmV Arch repository</title></head>
+<body>
+<h1>DogeTmV Arch repository</h1>
+<p>Add one entry to <code>/etc/pacman.conf</code> to use every published package:</p>
+<pre>
+[dogetmv]
+SigLevel = Optional TrustAll
+Server = https://DogeTmV.github.io/arch-packages/$arch
+</pre>
+<p>Then run <code>sudo pacman -Syu</code> and <code>sudo pacman -S &lt;package&gt;</code>.</p>
+</body>
+</html>
