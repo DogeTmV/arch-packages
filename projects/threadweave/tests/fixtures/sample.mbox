@@ -1,0 +1,35 @@
+From alice@example.com Mon Jan  1 10:00:00 2024
+From: Alice <alice@example.com>
+To: team@example.com
+Subject: Garden plan
+Date: Mon, 1 Jan 2024 10:00:00 +0000
+Message-ID: <a@example.com>
+
+Let's plant beans in the raised bed.
+
+From bob@example.com Mon Jan  1 11:00:00 2024
+From: Bob <bob@example.com>
+To: team@example.com
+Subject: Re: Garden plan
+Date: Mon, 1 Jan 2024 11:00:00 +0000
+Message-ID: <b@example.com>
+In-Reply-To: <a@example.com>
+References: <a@example.com>
+
+Beans need a trellis near the fence <b>soon</b>.
+
+From cara@example.com Tue Jan  2 09:00:00 2024
+From: Cara <cara@example.com>
+To: team@example.com
+Subject: Meeting notes
+Date: Tue, 2 Jan 2024 09:00:00 +0000
+Message-ID: <c@example.com>
+
+Please bring a pen and a notebook.
+
+From dan@example.com Wed Jan  3 12:00:00 2024
+From: Dan <dan@example.com>
+Subject: =?bogus?Q?Broken subject
+Message-ID: <d@example.com>
+This line is not a well-formed header
+Maybe we can meet next week instead.

@@ -1,0 +1,273 @@
+#!/usr/bin/env python3
+"""desksearch - a local full-text indexer over plain-text files."""
+
+import argparse
+import fnmatch
+import html
+import json
+import os
+import re
+import sys
+
+VERSION = "0.1.0"
+APP = "desksearch"
+DEFAULT_DB = os.path.join(os.path.expanduser("~"), ".local", "share", APP, "index.json")
+DEFAULT_EXTS = ".txt,.md,.markdown,.rst,.py,.c,.h,.js,.json,.html,.css,.sh,.csv,.log,.ini,.cfg,.yaml,.yml"
+DEFAULT_MAX_BYTES = 2 * 1024 * 1024
+TOKEN_RE = re.compile(r"[a-z0-9]+")
+
+
+def die(message):
+    print("{}: {}".format(APP, message), file=sys.stderr)
+    raise SystemExit(1)
+
+
+def load_store(db_path):
+    if not os.path.exists(db_path):
+        return {"version": 1, "roots": [], "ignore": [], "files": {}}
+    try:
+        with open(db_path, encoding="utf-8") as handle:
+            store = json.load(handle)
+    except (OSError, ValueError) as exc:
+        die("cannot read index {}: {}".format(db_path, exc))
+    if not isinstance(store, dict) or not isinstance(store.get("files"), dict):
+        die("index {} is not a valid desksearch index".format(db_path))
+    store.setdefault("roots", [])
+    store.setdefault("ignore", [])
+    return store
+
+
+def save_store(db_path, store):
+    try:
+        os.makedirs(os.path.dirname(os.path.abspath(db_path)), exist_ok=True)
+        with open(db_path, "w", encoding="utf-8") as handle:
+            json.dump(store, handle, indent=2, sort_keys=True, ensure_ascii=False)
+            handle.write("\n")
+    except OSError as exc:
+        die("cannot write index {}: {}".format(db_path, exc))
+
+
+def tokenize(text):
+    tokens = {}
+    for match in TOKEN_RE.finditer(text.lower()):
+        tokens.setdefault(match.group(), []).append(match.start())
+    return tokens
+
+
+def parse_exts(raw):
+    exts = set()
+    for part in raw.split(","):
+        part = part.strip().lower()
+        if not part:
+            continue
+        exts.add(part if part.startswith(".") else "." + part)
+    if not exts:
+        die("--ext must list at least one extension")
+    return exts
+
+
+def is_ignored(path, root, patterns):
+    relative = os.path.relpath(path, root)
+    for pattern in patterns:
+        if (fnmatch.fnmatch(os.path.basename(path), pattern)
+                or fnmatch.fnmatch(relative, pattern)
+                or fnmatch.fnmatch(path, pattern)):
+            return True
+    return False
+
+
+def index_one(store, path, root, max_bytes):
+    try:
+        stat = os.stat(path)
+    except OSError:
+        return None
+    if stat.st_size > max_bytes or stat.st_size == 0:
+        return None
+    try:
+        with open(path, "rb") as handle:
+            data = handle.read(max_bytes + 1)
+    except OSError:
+        return None
+    if b"\x00" in data:
+        return None
+    text = data.decode("utf-8", errors="replace")
+    existing = store["files"].get(path)
+    if existing and existing.get("mtime") == stat.st_mtime and existing.get("size") == stat.st_size:
+        return None
+    return {
+        "path": path,
+        "mtime": stat.st_mtime,
+        "size": stat.st_size,
+        "tokens": tokenize(text),
+    }
+
+
+def cmd_index(args):
+    roots = []
+    for raw in args.dirs:
+        root = os.path.abspath(raw)
+        if not os.path.isdir(root):
+            die("directory not found: {}".format(raw))
+        if root not in roots:
+            roots.append(root)
+    exts = parse_exts(args.ext)
+    if args.max_bytes <= 0:
+        die("--max-bytes must be positive")
+    store = load_store(args.db)
+    store["roots"] = sorted(roots)
+    keep = set()
+    for root in roots:
+        keep.update(p for p in store["files"]
+                    if (p == root or p.startswith(root + os.sep)) and os.path.isfile(p))
+    store["files"] = {p: entry for p, entry in store["files"].items() if p in keep}
+    added = 0
+    for root in roots:
+        for current, dirs, files in os.walk(root):
+            dirs.sort()
+            for name in sorted(files):
+                path = os.path.join(current, name)
+                if os.path.islink(path) or not name.lower().endswith(tuple(exts)):
+                    continue
+                if is_ignored(path, root, store["ignore"]):
+                    continue
+                entry = index_one(store, path, root, args.max_bytes)
+                if entry:
+                    store["files"][path] = entry
+                    added += 1
+    save_store(args.db, store)
+    print("indexed {} file(s) across {} root(s)".format(added, len(roots)))
+
+
+def build_snippet(path, tokens, terms):
+    try:
+        with open(path, encoding="utf-8", errors="replace") as handle:
+            text = handle.read()
+    except OSError:
+        return ""
+    positions = [pos for term in terms for pos in tokens.get(term, [])]
+    center = min(positions) if positions else 0
+    start = max(0, center - 30)
+    end = min(len(text), start + 110)
+    snippet = html.escape(text[start:end].replace("\n", " "))
+    pattern = re.compile("(" + "|".join(re.escape(term) for term in terms) + ")", re.IGNORECASE)
+    return pattern.sub(r"<mark>\1</mark>", snippet)
+
+
+def cmd_search(args):
+    terms = [term for term in TOKEN_RE.findall(args.query.lower())]
+    if not terms:
+        die("search query must contain at least one word")
+    store = load_store(args.db)
+    files = store["files"]
+    if args.path:
+        prefix = os.path.abspath(args.path)
+        files = {p: entry for p, entry in files.items() if p.startswith(prefix)}
+    matches = [(p, entry) for p, entry in files.items()
+               if all(term in entry.get("tokens", {}) for term in terms)]
+    if not matches:
+        print("(no matches)")
+        return
+    mtimes = [entry.get("mtime", 0) for entry in files.values()]
+    low, high = min(mtimes), max(mtimes)
+    span = high - low
+
+    def rank(item):
+        _, entry = item
+        frequency = sum(len(entry["tokens"][term]) for term in terms)
+        recency = (entry.get("mtime", 0) - low) / span if span > 0 else 1.0
+        return frequency + recency
+
+    matches.sort(key=lambda item: (-rank(item), item[0]))
+    for path, entry in matches[:args.limit]:
+        print("{:.3f}\t{}\t{}".format(
+            rank((path, entry)), path, build_snippet(path, entry["tokens"], terms)))
+
+
+def cmd_status(args):
+    store = load_store(args.db)
+    total_tokens = sum(len(entry.get("tokens", {})) for entry in store["files"].values())
+    print("index: {}".format(args.db))
+    print("roots: {}".format(len(store["roots"])))
+    print("files: {}".format(len(store["files"])))
+    print("tokens: {}".format(total_tokens))
+    print("ignores: {}".format(len(store["ignore"])))
+
+
+def cmd_clear(args):
+    save_store(args.db, {"version": 1, "roots": [], "ignore": [], "files": {}})
+    print("index cleared")
+
+
+def cmd_ignore(args):
+    store = load_store(args.db)
+    pattern = args.glob.strip()
+    if not pattern:
+        die("ignore pattern must not be empty")
+    if pattern not in store["ignore"]:
+        store["ignore"].append(pattern)
+        store["ignore"].sort()
+    save_store(args.db, store)
+    print("ignoring {}".format(pattern))
+
+
+def cmd_list_ignores(args):
+    patterns = load_store(args.db)["ignore"]
+    if not patterns:
+        print("(none)")
+        return
+    for pattern in patterns:
+        print(pattern)
+
+
+def build_parser():
+    db_parent = argparse.ArgumentParser(add_help=False)
+    db_parent.add_argument("--db", default=argparse.SUPPRESS,
+                           help="path to the JSON index (default: ~/.local/share/desksearch/index.json)")
+    parser = argparse.ArgumentParser(
+        prog=APP,
+        description="A deterministic local full-text indexer for plain-text files.",
+    )
+    parser.add_argument("--version", action="version", version="{} {}".format(APP, VERSION))
+    parser.add_argument("--db", default=None, help=argparse.SUPPRESS)
+    subs = parser.add_subparsers(dest="command", required=True)
+
+    p = subs.add_parser("index", parents=[db_parent], help="index directories of text files")
+    p.add_argument("dirs", nargs="+")
+    p.add_argument("--ext", default=DEFAULT_EXTS, help="comma-separated extensions")
+    p.add_argument("--max-bytes", type=int, default=DEFAULT_MAX_BYTES)
+    p.set_defaults(func=cmd_index)
+
+    p = subs.add_parser("search", parents=[db_parent], help="search the index")
+    p.add_argument("query")
+    p.add_argument("--limit", type=int, default=50)
+    p.add_argument("--path", help="only show results under this path prefix")
+    p.set_defaults(func=cmd_search)
+
+    p = subs.add_parser("status", parents=[db_parent], help="show index statistics")
+    p.set_defaults(func=cmd_status)
+
+    p = subs.add_parser("clear", parents=[db_parent], help="empty the index")
+    p.set_defaults(func=cmd_clear)
+
+    p = subs.add_parser("ignore", parents=[db_parent], help="add an ignore glob")
+    p.add_argument("glob")
+    p.set_defaults(func=cmd_ignore)
+
+    p = subs.add_parser("list-ignores", parents=[db_parent], help="list ignore globs")
+    p.set_defaults(func=cmd_list_ignores)
+    return parser
+
+
+def main(argv=None):
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    args.db = args.db or DEFAULT_DB
+    limit = getattr(args, "limit", None)
+    if limit is not None and limit < 1:
+        die("--limit must be at least 1")
+    args.func(args)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

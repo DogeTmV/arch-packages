@@ -1,0 +1,330 @@
+#!/usr/bin/env python3
+"""chathoard - a unified, offline archive for old chat-log exports."""
+
+import argparse
+import hashlib
+import html
+import json
+import os
+import re
+import sys
+
+VERSION = "0.1.0"
+APP = "chathoard"
+DEFAULT_DB = os.path.join(os.path.expanduser("~"), ".local", "share", APP, "store.json")
+
+PLAIN_RE = re.compile(r"^\[([^\]]+)\]\s+([^:]+):\s*(.*)$")
+IRC_RE = re.compile(r"^(?:\[([^\]]+)\]\s*)?<([^>]+)>\s*(.*)$")
+SERVICE_HINTS = ("aim", "msn", "yahoo", "gtalk", "skype", "icq", "irc")
+
+
+def die(message):
+    print("{}: {}".format(APP, message), file=sys.stderr)
+    raise SystemExit(1)
+
+
+def load_store(db_path):
+    if not os.path.exists(db_path):
+        return {"version": 1, "conversations": []}
+    try:
+        with open(db_path, encoding="utf-8") as handle:
+            store = json.load(handle)
+    except (OSError, ValueError) as exc:
+        die("cannot read store {}: {}".format(db_path, exc))
+    if not isinstance(store, dict) or not isinstance(store.get("conversations"), list):
+        die("store {} is not a valid chathoard store".format(db_path))
+    return store
+
+
+def save_store(db_path, store):
+    try:
+        parent = os.path.dirname(os.path.abspath(db_path))
+        os.makedirs(parent, exist_ok=True)
+        with open(db_path, "w", encoding="utf-8") as handle:
+            json.dump(store, handle, indent=2, sort_keys=True, ensure_ascii=False)
+            handle.write("\n")
+    except OSError as exc:
+        die("cannot write store {}: {}".format(db_path, exc))
+
+
+def conversation_id(service, filename):
+    digest = hashlib.sha256("{}|{}".format(service, filename).encode("utf-8")).hexdigest()
+    return "c-" + digest[:12]
+
+
+def detect_format(lines, requested):
+    if requested != "auto":
+        return requested
+    if any(IRC_RE.match(line) for line in lines):
+        return "irc"
+    if any(PLAIN_RE.match(line) for line in lines):
+        return "plain"
+    return "plain"
+
+
+def parse_messages(text, requested_format):
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    fmt = detect_format(lines, requested_format)
+    messages = []
+    for line in lines:
+        match = None
+        if fmt == "irc":
+            match = IRC_RE.match(line)
+        elif fmt == "plain":
+            match = PLAIN_RE.match(line)
+            if not match:
+                match = IRC_RE.match(line)
+        if match:
+            groups = match.groups()
+            timestamp = groups[0] or ""
+            sender = groups[1]
+            body = groups[2]
+        else:
+            timestamp, sender, body = "", "unknown", line
+        messages.append({"ts": timestamp, "sender": sender, "text": body})
+    return messages, fmt
+
+
+def infer_service(filename):
+    lower = filename.lower()
+    for hint in SERVICE_HINTS:
+        if hint in lower:
+            return hint
+    return "unknown"
+
+
+def find_conversation(store, conv_id):
+    for conv in store["conversations"]:
+        if conv["id"] == conv_id:
+            return conv
+    die("no conversation with id {}".format(conv_id))
+
+
+def format_message(message):
+    prefix = "[{}] ".format(message["ts"]) if message["ts"] else ""
+    return "{}{}: {}".format(prefix, message["sender"], message["text"])
+
+
+def cmd_import(args):
+    path = os.path.abspath(args.file)
+    if not os.path.isfile(path):
+        die("file not found: {}".format(args.file))
+    try:
+        with open(path, encoding="utf-8", errors="replace") as handle:
+            text = handle.read()
+    except OSError as exc:
+        die("cannot read {}: {}".format(args.file, exc))
+    filename = os.path.basename(path)
+    service = args.service or infer_service(filename)
+    messages, fmt = parse_messages(text, args.format)
+    store = load_store(args.db)
+    conv_id = conversation_id(service, filename)
+    store["conversations"] = [c for c in store["conversations"] if c["id"] != conv_id]
+    store["conversations"].append({
+        "id": conv_id,
+        "file": filename,
+        "service": service,
+        "format": fmt,
+        "messages": messages,
+        "tags": [],
+    })
+    store["conversations"].sort(key=lambda c: c["id"])
+    save_store(args.db, store)
+    print("imported {} message(s) into {} from {}".format(len(messages), conv_id, filename))
+
+
+def cmd_list(args):
+    store = load_store(args.db)
+    if not store["conversations"]:
+        print("(no conversations)")
+        return
+    for conv in store["conversations"]:
+        tags = ",".join(conv.get("tags", [])) or "-"
+        print("{}\t{}\t{}\t{} message(s)\t[{}]".format(
+            conv["id"], conv["service"], conv["file"], len(conv["messages"]), tags))
+
+
+def cmd_show(args):
+    conv = find_conversation(load_store(args.db), args.id)
+    print("{} | {} | {}".format(conv["id"], conv["service"], conv["file"]))
+    tags = ", ".join(conv.get("tags", []))
+    if tags:
+        print("tags: {}".format(tags))
+    for message in conv["messages"]:
+        print(format_message(message))
+
+
+def cmd_search(args):
+    needle = args.query.lower()
+    store = load_store(args.db)
+    hits = 0
+    for conv in store["conversations"]:
+        for index, message in enumerate(conv["messages"]):
+            if needle in message["text"].lower() or needle in message["sender"].lower():
+                hits += 1
+                print("{} [{}] {}".format(conv["id"], index, format_message(message)))
+    if not hits:
+        print("(no matches)")
+
+
+def cmd_tag(args):
+    store = load_store(args.db)
+    conv = find_conversation(store, args.id)
+    tag = args.tag.strip()
+    if not tag:
+        die("tag must not be empty")
+    if tag not in conv.setdefault("tags", []):
+        conv["tags"].append(tag)
+        conv["tags"].sort()
+    save_store(args.db, store)
+    print("{} tagged {}".format(args.id, tag))
+
+
+def cmd_tags(args):
+    counts = {}
+    for conv in load_store(args.db)["conversations"]:
+        for tag in conv.get("tags", []):
+            counts[tag] = counts.get(tag, 0) + 1
+    if not counts:
+        print("(no tags)")
+        return
+    for tag in sorted(counts):
+        print("{}\t{}".format(tag, counts[tag]))
+
+
+def render_html(conv):
+    parts = [
+        "<!DOCTYPE html>",
+        '<html lang="en"><head><meta charset="utf-8">',
+        "<title>{}</title>".format(html.escape(conv["id"])),
+        "<style>body{font-family:sans-serif;max-width:60em;margin:2em auto}"
+        "li{margin:.4em 0}.meta{color:#555}</style>",
+        "</head><body>",
+        "<h1>{}</h1>".format(html.escape(conv["service"])),
+        '<p class="meta">{} | {} | tags: {}</p>'.format(
+            html.escape(conv["id"]), html.escape(conv["file"]),
+            html.escape(", ".join(conv.get("tags", [])))),
+        "<ol>",
+    ]
+    for message in conv["messages"]:
+        parts.append("<li>{}</li>".format(html.escape(format_message(message))))
+    parts.extend(["</ol>", "</body></html>", ""])
+    return "\n".join(parts)
+
+
+def render_markdown(conv):
+    parts = [
+        "# {} ({})".format(conv["id"], conv["service"]),
+        "",
+        "Source: {}  ".format(conv["file"]),
+        "Tags: {}".format(", ".join(conv.get("tags", [])) or "none"),
+        "",
+    ]
+    for message in conv["messages"]:
+        parts.append("- {}".format(format_message(message)))
+    parts.append("")
+    return "\n".join(parts)
+
+
+def cmd_export(args):
+    store = load_store(args.db)
+    out_dir = os.path.abspath(args.outdir)
+    try:
+        os.makedirs(out_dir, exist_ok=True)
+    except OSError as exc:
+        die("cannot create {}: {}".format(args.outdir, exc))
+    renderer = render_html if args.format == "html" else render_markdown
+    ext = "html" if args.format == "html" else "md"
+    index_lines = ["# chathoard export", ""]
+    for conv in store["conversations"]:
+        name = "{}.{}".format(conv["id"], ext)
+        with open(os.path.join(out_dir, name), "w", encoding="utf-8") as handle:
+            handle.write(renderer(conv))
+        index_lines.append("- [{}]({}) - {}, {} message(s)".format(
+            conv["id"], name, conv["service"], len(conv["messages"])))
+    index_lines.append("")
+    if args.format == "html":
+        body = "\n".join(
+            ["<!DOCTYPE html>", '<html lang="en"><head><meta charset="utf-8">',
+             "<title>chathoard export</title></head><body>",
+             "<h1>chathoard export</h1>", "<ul>"] +
+            ["<li>{}</li>".format(html.escape(line)) for line in index_lines[2:-1]] +
+            ["</ul>", "</body></html>", ""])
+        index_name = "index.html"
+    else:
+        body = "\n".join(index_lines)
+        index_name = "index.md"
+    with open(os.path.join(out_dir, index_name), "w", encoding="utf-8") as handle:
+        handle.write(body)
+    print("exported {} conversation(s) to {}".format(len(store["conversations"]), out_dir))
+
+
+def cmd_stats(args):
+    store = load_store(args.db)
+    convs = store["conversations"]
+    messages = sum(len(c["messages"]) for c in convs)
+    services = len({c["service"] for c in convs})
+    tags = len({t for c in convs for t in c.get("tags", [])})
+    print("conversations: {}".format(len(convs)))
+    print("messages: {}".format(messages))
+    print("services: {}".format(services))
+    print("tags: {}".format(tags))
+
+
+def build_parser():
+    db_parent = argparse.ArgumentParser(add_help=False)
+    db_parent.add_argument("--db", default=argparse.SUPPRESS,
+                           help="path to the JSON store (default: ~/.local/share/chathoard/store.json)")
+    parser = argparse.ArgumentParser(
+        prog=APP,
+        description="Unified offline archive for exported chat logs (AIM, MSN, Yahoo, GTalk, IRC).",
+    )
+    parser.add_argument("--version", action="version", version="{} {}".format(APP, VERSION))
+    parser.add_argument("--db", default=None, help=argparse.SUPPRESS)
+    subs = parser.add_subparsers(dest="command", required=True)
+
+    p = subs.add_parser("import", parents=[db_parent], help="import a chat log file")
+    p.add_argument("file")
+    p.add_argument("--service", help="service name (default: inferred from filename)")
+    p.add_argument("--format", choices=("auto", "plain", "irc"), default="auto")
+    p.set_defaults(func=cmd_import)
+
+    p = subs.add_parser("list", parents=[db_parent], help="list archived conversations")
+    p.set_defaults(func=cmd_list)
+
+    p = subs.add_parser("show", parents=[db_parent], help="show one conversation")
+    p.add_argument("id")
+    p.set_defaults(func=cmd_show)
+
+    p = subs.add_parser("search", parents=[db_parent], help="search message text")
+    p.add_argument("query")
+    p.set_defaults(func=cmd_search)
+
+    p = subs.add_parser("tag", parents=[db_parent], help="add a tag to a conversation")
+    p.add_argument("id")
+    p.add_argument("tag")
+    p.set_defaults(func=cmd_tag)
+
+    p = subs.add_parser("tags", parents=[db_parent], help="list all tags")
+    p.set_defaults(func=cmd_tags)
+
+    p = subs.add_parser("export", parents=[db_parent], help="write a deterministic export")
+    p.add_argument("outdir")
+    p.add_argument("--format", choices=("html", "markdown"), default="html")
+    p.set_defaults(func=cmd_export)
+
+    p = subs.add_parser("stats", parents=[db_parent], help="show archive statistics")
+    p.set_defaults(func=cmd_stats)
+    return parser
+
+
+def main(argv=None):
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    args.db = args.db or DEFAULT_DB
+    args.func(args)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

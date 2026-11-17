@@ -1,0 +1,305 @@
+#!/usr/bin/env python3
+"""threadweave - browse mbox mail archives as threaded conversations."""
+
+import argparse
+import hashlib
+import html
+import json
+import mailbox
+import re
+import sys
+from email.header import decode_header, make_header
+from pathlib import Path
+
+VERSION = "0.1.0"
+DEFAULT_DB = Path.home() / ".local" / "share" / "threadweave" / "store.json"
+
+
+class StoreError(Exception):
+    """A user-facing error with no traceback."""
+
+
+def build_parser():
+    parser = argparse.ArgumentParser(
+        prog="threadweave", description="Group mbox messages into threads and browse them offline."
+    )
+    parser.add_argument("--version", action="version", version=f"threadweave {VERSION}")
+    subs = parser.add_subparsers(dest="command", required=True)
+
+    def with_db(sub):
+        sub.add_argument("--db", default=str(DEFAULT_DB), metavar="PATH", help="JSON store path")
+
+    imp = subs.add_parser("import", help="import an mbox file")
+    imp.add_argument("mbox")
+    with_db(imp)
+
+    listing = subs.add_parser("list", help="list threads")
+    listing.add_argument("--limit", type=int, default=20, metavar="N")
+    with_db(listing)
+
+    show = subs.add_parser("show", help="show one thread")
+    show.add_argument("thread_id")
+    show.add_argument("--format", choices=("text", "html"), default="text")
+    with_db(show)
+
+    search = subs.add_parser("search", help="search messages")
+    search.add_argument("query")
+    with_db(search)
+
+    export = subs.add_parser("export", help="export threads as HTML")
+    export.add_argument("outdir")
+    export.add_argument("--format", choices=("html",), default="html")
+    with_db(export)
+
+    stats = subs.add_parser("stats", help="store statistics")
+    with_db(stats)
+    return parser
+
+
+def decode(value):
+    if not value:
+        return ""
+    try:
+        return str(make_header(decode_header(str(value))))
+    except Exception:
+        return str(value)
+
+
+def normalize_subject(value):
+    text = re.sub(r"^\s*(?:(?:re|fw|fwd)\s*:\s*)+", "", decode(value), flags=re.IGNORECASE)
+    return re.sub(r"\s+", " ", text.strip().casefold())
+
+
+def message_body(message):
+    parts = []
+    if message.is_multipart():
+        for part in message.walk():
+            if part.get_content_type() == "text/plain":
+                parts.append(part)
+                break
+    else:
+        parts.append(message)
+    if not parts:
+        return ""
+    payload = parts[0].get_payload(decode=True)
+    if payload is None:
+        payload = str(parts[0].get_payload()).encode("utf-8", "replace")
+    charset = parts[0].get_content_charset() or "utf-8"
+    try:
+        return payload.decode(charset, "replace")
+    except LookupError:
+        return payload.decode("utf-8", "replace")
+
+
+def parse_mbox(path):
+    try:
+        box = mailbox.mbox(str(path), create=False)
+    except (OSError, ValueError) as exc:
+        raise StoreError(f"cannot open mbox file {path!r}: {exc}") from None
+    records = []
+    try:
+        for index, message in enumerate(box):
+            message_id = decode(message.get("Message-ID", "")).strip() or f"local-{index}"
+            references = [item for item in decode(message.get("References", "")).split() if item.startswith("<")]
+            replies = [item for item in decode(message.get("In-Reply-To", "")).split() if item.startswith("<")]
+            records.append({
+                "id": message_id,
+                "subject": decode(message.get("Subject", "")) or "(no subject)",
+                "normalized_subject": normalize_subject(message.get("Subject", "")),
+                "from": decode(message.get("From", "")) or "(unknown)",
+                "date": decode(message.get("Date", "")),
+                "refs": references + replies,
+                "body": message_body(message).strip(),
+                "index": index,
+            })
+    finally:
+        box.close()
+    return records
+
+
+def group_threads(records):
+    ids = {record["id"] for record in records}
+    parent = {record["id"]: record["id"] for record in records}
+
+    def find(item):
+        while parent[item] != item:
+            parent[item] = parent[parent[item]]
+            item = parent[item]
+        return item
+
+    def union(left, right):
+        first, second = find(left), find(right)
+        if first != second:
+            parent[second] = first
+
+    by_subject = {}
+    for record in records:
+        for ref in record["refs"]:
+            if ref in ids and ref != record["id"]:
+                union(record["id"], ref)
+        key = record["normalized_subject"]
+        if key:
+            if key in by_subject:
+                union(record["id"], by_subject[key])
+            else:
+                by_subject[key] = record["id"]
+
+    groups = {}
+    for record in records:
+        groups.setdefault(find(record["id"]), []).append(record)
+
+    threads = []
+    used_ids = set()
+    for members in sorted(groups.values(), key=lambda group: min(r["index"] for r in group)):
+        display = re.sub(r"^\s*(?:re|fw|fwd)\s*:\s*", "", members[0]["subject"], flags=re.IGNORECASE).strip()
+        display = display or "(no subject)"
+        base = hashlib.sha256(display.casefold().encode("utf-8")).hexdigest()[:10]
+        thread_id, suffix = base, 1
+        while thread_id in used_ids:
+            suffix += 1
+            thread_id = f"{base}-{suffix}"
+        used_ids.add(thread_id)
+        for record in members:
+            record["thread_id"] = thread_id
+        threads.append({
+            "id": thread_id,
+            "subject": display,
+            "messages": [record["id"] for record in sorted(members, key=lambda r: r["index"])],
+        })
+    return threads
+
+
+def load_store(path):
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        raise StoreError(f"no store at {path!r}; run 'threadweave import' first") from None
+    except (OSError, ValueError) as exc:
+        raise StoreError(f"cannot read store {path!r}: {exc}") from None
+    if not isinstance(data, dict) or "messages" not in data or "threads" not in data:
+        raise StoreError(f"store {path!r} is missing messages or threads")
+    return data
+
+
+def save_store(path, data):
+    target = Path(path)
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    except OSError as exc:
+        raise StoreError(f"cannot write store {path!r}: {exc}") from None
+
+
+def cmd_import(args):
+    records = parse_mbox(args.mbox)
+    threads = group_threads(records)
+    save_store(args.db, {"version": 1, "messages": records, "threads": threads})
+    print(f"Imported {len(records)} messages in {len(threads)} threads from {args.mbox}")
+
+
+def find_thread(store, thread_id):
+    for thread in store["threads"]:
+        if thread["id"].casefold() == thread_id.strip().casefold():
+            return thread
+    raise StoreError(f"thread not found: {thread_id!r}")
+
+
+def messages_of(store, thread):
+    by_id = {record["id"]: record for record in store["messages"]}
+    return [by_id[message_id] for message_id in thread["messages"] if message_id in by_id]
+
+
+def render_text(store, thread):
+    lines = [f"Thread: {thread['subject']} [{thread['id']}]"]
+    for record in messages_of(store, thread):
+        lines += ["", f"From: {record['from']}", f"Date: {record['date'] or '(unknown)'}",
+                  f"Subject: {record['subject']}", "", record["body"]]
+    return "\n".join(lines)
+
+
+def render_html(store, thread):
+    parts = [
+        "<!DOCTYPE html>", "<html lang=\"en\"><head><meta charset=\"utf-8\">",
+        f"<title>{html.escape(thread['subject'])}</title></head><body>",
+        f"<h1>{html.escape(thread['subject'])}</h1>",
+    ]
+    for record in messages_of(store, thread):
+        parts += [
+            "<article>", f"<p>From: {html.escape(record['from'])}</p>",
+            f"<p>Date: {html.escape(record['date'] or '(unknown)')}</p>",
+            f"<h2>{html.escape(record['subject'])}</h2>",
+            f"<pre>{html.escape(record['body'])}</pre>", "</article>",
+        ]
+    parts.append("</body></html>")
+    return "\n".join(parts)
+
+
+def cmd_list(args):
+    if args.limit < 1:
+        raise StoreError("--limit must be a positive integer")
+    store = load_store(args.db)
+    for thread in store["threads"][:args.limit]:
+        count = len(thread["messages"])
+        print(f"{thread['id']}  {thread['subject']}  ({count} message{'s' if count != 1 else ''})")
+
+
+def cmd_show(args):
+    store = load_store(args.db)
+    thread = find_thread(store, args.thread_id)
+    print(render_html(store, thread) if args.format == "html" else render_text(store, thread))
+
+
+def cmd_search(args):
+    terms = args.query.casefold().split()
+    if not terms:
+        raise StoreError("search query must not be empty")
+    store = load_store(args.db)
+    for thread in store["threads"]:
+        haystack = " ".join(
+            [thread["subject"]] + [field for record in messages_of(store, thread)
+                                   for field in (record["subject"], record["from"], record["body"])]
+        ).casefold()
+        if all(term in haystack for term in terms):
+            print(f"{thread['id']}  {thread['subject']}")
+
+
+def cmd_export(args):
+    outdir = Path(args.outdir)
+    try:
+        outdir.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise StoreError(f"cannot create export directory {outdir}: {exc}") from None
+    store = load_store(args.db)
+    for thread in store["threads"]:
+        target = outdir / f"{thread['id']}.html"
+        try:
+            target.write_text(render_html(store, thread) + "\n", encoding="utf-8")
+        except OSError as exc:
+            raise StoreError(f"cannot write export file {target}: {exc}") from None
+    print(f"Exported {len(store['threads'])} threads to {outdir}")
+
+
+def cmd_stats(args):
+    store = load_store(args.db)
+    print(f"messages: {len(store['messages'])}")
+    print(f"threads: {len(store['threads'])}")
+
+
+COMMANDS = {
+    "import": cmd_import, "list": cmd_list, "show": cmd_show,
+    "search": cmd_search, "export": cmd_export, "stats": cmd_stats,
+}
+
+
+def main(argv=None):
+    args = build_parser().parse_args(argv)
+    try:
+        COMMANDS[args.command](args)
+    except StoreError as exc:
+        print(f"threadweave: error: {exc}", file=sys.stderr)
+        return 2
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

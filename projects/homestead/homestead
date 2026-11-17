@@ -1,0 +1,309 @@
+#!/usr/bin/env python3
+"""homestead - generate a small static personal homepage from Markdown-ish text.
+
+Includes a stdlib-only converter for headings, paragraphs, bullet lists,
+links and images. No external Markdown package is used.
+"""
+
+import argparse
+import html
+import json
+import os
+import re
+import sys
+from datetime import date
+from pathlib import Path
+
+VERSION = "0.1.0"
+CONFIG_NAME = "homestead.json"
+THEMES = {
+    "classic": (
+        "body{background:#f4ecd8;color:#222;font-family:Georgia,serif;"
+        "max-width:50em;margin:2em auto;padding:0 1em;line-height:1.5}\n"
+        "a{color:#8b4513}h1{border-bottom:3px double #8b4513}\n"
+        "ul.nav{background:#e8d8b0;padding:.5em 1em;list-style:none}\n"
+        "img{max-width:100%}\n"
+    ),
+    "minimal": (
+        "body{background:#fff;color:#111;font-family:system-ui,sans-serif;"
+        "max-width:42em;margin:4em auto;padding:0 1em;line-height:1.6}\n"
+        "a{color:#06c;text-decoration:none}h1{font-weight:400;letter-spacing:.02em}\n"
+        "ul.nav{list-style:none;padding:0}h1,h2{border:0}\n"
+        "img{max-width:100%}\n"
+    ),
+    "brick": (
+        "body{background:#7b3f2f;color:#fff;font-family:Verdana,sans-serif;"
+        "max-width:52em;margin:0 auto;padding:2em 1em;line-height:1.5}\n"
+        "a{color:#ffdf6e}h1{text-shadow:2px 2px #4a241b}\n"
+        "ul.nav{background:#4a241b;padding:.75em 1.5em;list-style:none}\n"
+        "img{border:4px ridge #d7a86e;max-width:100%}\n"
+    ),
+}
+INLINE = re.compile(r"(!?)\[([^\]]*)\]\(([^)\s]+)\)")
+HEADING = re.compile(r"^(#{1,6})\s+(.*)$")
+
+
+class HomesteadError(Exception):
+    """A user-facing error from site operations."""
+
+
+def config_path(directory):
+    return Path(directory) / CONFIG_NAME
+
+
+def load_config(directory):
+    path = config_path(directory)
+    if not path.is_file():
+        raise HomesteadError("no homestead site in '%s' (run 'homestead init' first)" % directory)
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError) as exc:
+        raise HomesteadError("cannot read '%s': %s" % (path, exc)) from exc
+    if not isinstance(data, dict) or not isinstance(data.get("pages"), list):
+        raise HomesteadError("invalid site configuration in '%s'" % path)
+    return data
+
+
+def save_config(directory, config):
+    root = Path(directory)
+    root.mkdir(parents=True, exist_ok=True)
+    path = config_path(directory)
+    temp = path.with_suffix(".tmp")
+    with open(temp, "w", encoding="utf-8") as fh:
+        json.dump(config, fh, indent=2, ensure_ascii=False)
+        fh.write("\n")
+    os.replace(temp, path)
+
+
+def slugify(title):
+    slug = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")
+    return slug or "page"
+
+
+def inline_md(text):
+    """Escape text, then convert [label](url) and ![alt](url)."""
+    escaped = html.escape(text)
+
+    def replace(match):
+        bang, label, url = match.groups()
+        safe_url = html.escape(url, quote=True)
+        if bang:
+            return '<img src="%s" alt="%s">' % (safe_url, label)
+        return '<a href="%s">%s</a>' % (safe_url, label)
+
+    return INLINE.sub(replace, escaped)
+
+
+def markdown_to_html(source):
+    """Convert the supported Markdown subset to HTML fragments."""
+    result, paragraph, lines, index = [], [], source.replace("\r\n", "\n").split("\n"), 0
+
+    def flush():
+        if paragraph:
+            result.append("<p>%s</p>" % inline_md(" ".join(paragraph)))
+            paragraph.clear()
+
+    while index < len(lines):
+        line = lines[index].strip()
+        if not line:
+            flush()
+            index += 1
+            continue
+        heading = HEADING.match(line)
+        if heading:
+            flush()
+            level = len(heading.group(1))
+            result.append("<h%d>%s</h%d>" % (level, inline_md(heading.group(2)), level))
+            index += 1
+            continue
+        if line.startswith(("- ", "* ")):
+            flush()
+            items = []
+            while index < len(lines) and lines[index].strip().startswith(("- ", "* ")):
+                items.append("<li>%s</li>" % inline_md(lines[index].strip()[2:]))
+                index += 1
+            result.append("<ul>\n%s\n</ul>" % "\n".join(items))
+            continue
+        paragraph.append(line)
+        index += 1
+    flush()
+    return "\n".join(result)
+
+
+def nav_html():
+    return ('<ul class="nav">\n<li><a href="index.html">Home</a></li>\n'
+            '<li><a href="guestbook.html">Guestbook</a></li>\n</ul>')
+
+
+def page_shell(title, body):
+    return "\n".join([
+        "<!doctype html>", '<html lang="en">', "<head>",
+        '<meta charset="utf-8">',
+        '<link rel="stylesheet" href="styles.css">',
+        "<title>%s</title>" % html.escape(title),
+        "</head>", "<body>", body, "</body>", "</html>", "",
+    ])
+
+
+def build_site(directory, out):
+    config = load_config(directory)
+    output = Path(out)
+    output.mkdir(parents=True, exist_ok=True)
+    site_title = html.escape(config["title"])
+    author = html.escape(config.get("author", "") or "")
+    links = []
+    index_body = ["<h1>%s</h1>" % site_title]
+    if author:
+        index_body.append('<p class="byline">by %s</p>' % author)
+    index_body.append(nav_html())
+    index_body.append("<h2>Pages</h2>")
+    index_body.append('<ul class="pages">')
+    for page in config["pages"]:
+        slug = html.escape(page["slug"], quote=True)
+        title = html.escape(page["title"])
+        links.append(slug)
+        index_body.append('<li><a href="%s.html">%s</a> <time>%s</time></li>'
+                          % (slug, title, html.escape(page.get("date", ""))))
+    index_body.append("</ul>")
+    (output / "index.html").write_text(
+        page_shell(config["title"], "\n".join(index_body)), encoding="utf-8")
+
+    for page in config["pages"]:
+        slug = page["slug"]
+        body = '\n'.join([
+            "<h1>%s</h1>" % html.escape(page["title"]),
+            '<p class="date">%s</p>' % html.escape(page.get("date", "")),
+            nav_html(),
+            markdown_to_html(page.get("source", "")),
+            '<p><a href="index.html">Back home</a></p>',
+        ])
+        (output / (slug + ".html")).write_text(
+            page_shell(page["title"], body), encoding="utf-8")
+
+    guest = '\n'.join([
+        "<h1>Guestbook</h1>", nav_html(),
+        "<p>Leave a note below. This is a static guestbook page; "
+        "the form does not send messages to a server.</p>",
+        '<form action="#" method="post">',
+        '<label for="name">Name</label> <input id="name" name="name" type="text">',
+        '<label for="message">Message</label>',
+        '<textarea id="message" name="message" rows="4"></textarea>',
+        '<button type="submit">Sign</button>', "</form>",
+        '<p><a href="index.html">Back home</a></p>',
+    ])
+    (output / "guestbook.html").write_text(
+        page_shell("Guestbook", guest), encoding="utf-8")
+    (output / "styles.css").write_text(
+        THEMES.get(config.get("theme", "classic"), THEMES["classic"]),
+        encoding="utf-8")
+    return output
+
+
+def build_parser():
+    parser = argparse.ArgumentParser(
+        prog="homestead",
+        description="Generate a static personal homepage with themed CSS.",
+        epilog="Markdown subset: # headings, paragraphs, - bullets, "
+               "[links](url) and ![images](url).",
+    )
+    parser.add_argument("--version", action="version", version="homestead " + VERSION)
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    p = sub.add_parser("init", help="create a new site")
+    p.add_argument("dir")
+    p.add_argument("--title")
+    p.add_argument("--author")
+    p = sub.add_parser("add", help="add a page from a Markdown-ish file")
+    p.add_argument("dir")
+    p.add_argument("title")
+    p.add_argument("--file", metavar="page.md")
+    p.add_argument("--slug")
+    p.add_argument("--date")
+    p = sub.add_parser("build", help="write static HTML into --out")
+    p.add_argument("dir")
+    p.add_argument("--out", metavar="DIR")
+    p = sub.add_parser("list", help="list pages")
+    p.add_argument("dir")
+    p = sub.add_parser("theme", help="select the CSS theme")
+    p.add_argument("dir")
+    p.add_argument("name", choices=sorted(THEMES))
+    p = sub.add_parser("page", help="print one page's metadata and source")
+    p.add_argument("dir")
+    p.add_argument("slug")
+    return parser
+
+
+def dispatch(opts):
+    if opts.command == "init":
+        path = config_path(opts.dir)
+        if path.exists():
+            raise HomesteadError("a homestead site already exists in '%s'" % opts.dir)
+        title = opts.title or Path(opts.dir).name
+        save_config(opts.dir, {
+            "title": title,
+            "author": opts.author or "",
+            "theme": "classic",
+            "pages": [],
+        })
+        print("Initialised '%s' in %s" % (title, opts.dir))
+        return
+
+    config = load_config(opts.dir)
+    if opts.command == "add":
+        if opts.file:
+            source_path = Path(opts.file)
+            if not source_path.is_file():
+                raise HomesteadError("page file '%s' not found" % opts.file)
+            try:
+                source = source_path.read_text(encoding="utf-8")
+            except OSError as exc:
+                raise HomesteadError("cannot read '%s': %s" % (opts.file, exc)) from exc
+        else:
+            source = "# %s\n\nWrite about %s here.\n" % (opts.title, opts.title)
+        base = slugify(opts.slug or opts.title)
+        slug, counter = base, 2
+        while any(page["slug"] == slug for page in config["pages"]):
+            slug = "%s-%d" % (base, counter)
+            counter += 1
+        config["pages"].append({
+            "title": opts.title,
+            "slug": slug,
+            "date": opts.date or date.today().isoformat(),
+            "source": source,
+        })
+        save_config(opts.dir, config)
+        print("Added page '%s' (slug: %s)" % (opts.title, slug))
+    elif opts.command == "build":
+        out = opts.out or os.path.join(opts.dir, "site")
+        target = build_site(opts.dir, out)
+        print("Built %d pages in %s" % (len(config["pages"]), target))
+    elif opts.command == "list":
+        for page in config["pages"]:
+            print("%s\t%s\t%s" % (page["slug"], page["title"], page.get("date", "")))
+    elif opts.command == "theme":
+        config["theme"] = opts.name
+        save_config(opts.dir, config)
+        print("Theme set to '%s'" % opts.name)
+    elif opts.command == "page":
+        for page in config["pages"]:
+            if page["slug"] == opts.slug:
+                print("title: %s\nslug: %s\ndate: %s\n" % (
+                    page["title"], page["slug"], page.get("date", "")))
+                print(page.get("source", ""))
+                return
+        raise HomesteadError("no page with slug '%s'" % opts.slug)
+
+
+def main(argv=None):
+    parser = build_parser()
+    opts = parser.parse_args(sys.argv[1:] if argv is None else argv)
+    try:
+        dispatch(opts)
+    except (HomesteadError, OSError, ValueError) as exc:
+        parser.exit(2, "homestead: error: %s\n" % exc)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

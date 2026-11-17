@@ -1,0 +1,365 @@
+#!/usr/bin/env python3
+"""notebox - a small local notebook CLI with JSON state and text exports."""
+
+import argparse
+import datetime
+import html
+import json
+import os
+import re
+import sys
+
+VERSION = "0.1.0"
+APP = "notebox"
+DEFAULT_DB = os.path.join(os.path.expanduser("~"), ".local", "share", APP, "notes.json")
+TEXT_SUFFIXES = (".md", ".markdown", ".txt")
+
+
+def die(message):
+    print("{}: {}".format(APP, message), file=sys.stderr)
+    raise SystemExit(1)
+
+
+def now():
+    return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def load_store(db_path):
+    if not os.path.exists(db_path):
+        return {"version": 1, "next_id": 1, "notes": []}
+    try:
+        with open(db_path, encoding="utf-8") as handle:
+            store = json.load(handle)
+    except (OSError, ValueError) as exc:
+        die("cannot read store {}: {}".format(db_path, exc))
+    if not isinstance(store, dict) or not isinstance(store.get("notes"), list):
+        die("store {} is not a valid notebox store".format(db_path))
+    return store
+
+
+def save_store(db_path, store):
+    try:
+        os.makedirs(os.path.dirname(os.path.abspath(db_path)), exist_ok=True)
+        with open(db_path, "w", encoding="utf-8") as handle:
+            json.dump(store, handle, indent=2, sort_keys=True, ensure_ascii=False)
+            handle.write("\n")
+    except OSError as exc:
+        die("cannot write store {}: {}".format(db_path, exc))
+
+
+def next_note_id(store):
+    used = [int(n["id"][2:]) for n in store["notes"]
+            if n.get("id", "").startswith("n-") and n["id"][2:].isdigit()]
+    number = max([store.get("next_id", 1)] + used + [0])
+    store["next_id"] = number + 1
+    return "n-{:04d}".format(number)
+
+
+def find_note(store, note_id):
+    for note in store["notes"]:
+        if note["id"] == note_id:
+            return note
+    die("no note with id {}".format(note_id))
+
+
+def clean_tags(values):
+    if not values:
+        return []
+    return sorted({tag.strip() for tag in values if tag and tag.strip()})
+
+
+def create_note(store, title, body, tags):
+    note = {
+        "id": next_note_id(store),
+        "title": title or (body[:50] + ("..." if len(body) > 50 else "")),
+        "body": body,
+        "tags": clean_tags(tags),
+        "created": now(),
+        "updated": now(),
+    }
+    store["notes"].append(note)
+    return note
+
+
+def preview(note):
+    one_line = note["body"].replace("\n", " ")
+    return one_line if len(one_line) <= 60 else one_line[:57] + "..."
+
+
+def render_line(note):
+    return "{}\t{}\t[{}]\t{}".format(
+        note["id"], note["title"], ",".join(note["tags"]), preview(note))
+
+
+def cmd_add(args):
+    store = load_store(args.db)
+    tags = [t for t in (args.tags or "").split(",")]
+    note = create_note(store, args.title, " ".join(args.text), tags)
+    save_store(args.db, store)
+    print("added {}".format(note["id"]))
+
+
+def cmd_edit(args):
+    store = load_store(args.db)
+    note = find_note(store, args.id)
+    note["body"] = " ".join(args.text)
+    note["updated"] = now()
+    save_store(args.db, store)
+    print("updated {}".format(note["id"]))
+
+
+def cmd_rm(args):
+    store = load_store(args.db)
+    before = len(store["notes"])
+    store["notes"] = [n for n in store["notes"] if n["id"] != args.id]
+    if len(store["notes"]) == before:
+        die("no note with id {}".format(args.id))
+    save_store(args.db, store)
+    print("removed {}".format(args.id))
+
+
+def cmd_list(args):
+    notes = load_store(args.db)["notes"]
+    if args.tag:
+        notes = [n for n in notes if args.tag in n["tags"]]
+    if args.limit is not None:
+        if args.limit < 0:
+            die("--limit must not be negative")
+        notes = notes[:args.limit]
+    if not notes:
+        print("(no notes)")
+        return
+    for note in notes:
+        print(render_line(note))
+
+
+def cmd_show(args):
+    note = find_note(load_store(args.db), args.id)
+    print("id: {}".format(note["id"]))
+    print("title: {}".format(note["title"]))
+    print("tags: {}".format(", ".join(note["tags"]) or "none"))
+    print("created: {}".format(note["created"]))
+    print("updated: {}".format(note["updated"]))
+    print("")
+    print(note["body"])
+
+
+def cmd_search(args):
+    needle = args.query.lower()
+    found = False
+    for note in load_store(args.db)["notes"]:
+        haystack = [note["title"], note["body"]] + note["tags"]
+        if any(needle in field.lower() for field in haystack):
+            print(render_line(note))
+            found = True
+    if not found:
+        print("(no matches)")
+
+
+def cmd_tag(args):
+    store = load_store(args.db)
+    note = find_note(store, args.id)
+    note["tags"] = clean_tags(note["tags"] + list(args.tags))
+    note["updated"] = now()
+    save_store(args.db, store)
+    print("{} tagged {}".format(args.id, ",".join(args.tags)))
+
+
+def render_markdown(note):
+    return "\n".join([
+        "# {}".format(note["title"]),
+        "",
+        "Tags: {}".format(", ".join(note["tags"]) or "none"),
+        "Created: {}".format(note["created"]),
+        "Updated: {}".format(note["updated"]),
+        "",
+        note["body"],
+        "",
+    ])
+
+
+def render_html(note):
+    return "\n".join([
+        "<!DOCTYPE html>",
+        '<html lang="en"><head><meta charset="utf-8">',
+        "<title>{}</title>".format(html.escape(note["title"])),
+        "<style>body{font-family:sans-serif;max-width:50em;margin:2em auto}"
+        "pre{white-space:pre-wrap}.meta{color:#555}</style>",
+        "</head><body>",
+        "<h1>{}</h1>".format(html.escape(note["title"])),
+        '<p class="meta">Tags: {} | Created: {} | Updated: {}</p>'.format(
+            html.escape(", ".join(note["tags"]) or "none"),
+            html.escape(note["created"]), html.escape(note["updated"])),
+        "<pre>{}</pre>".format(html.escape(note["body"])),
+        "</body></html>",
+        "",
+    ])
+
+
+def safe_filename(title, extension, used):
+    slug = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")[:40].strip("-") or "note"
+    name = "{}.{}".format(slug, extension)
+    candidate, counter = name, 2
+    while candidate in used:
+        candidate = "{}-{}.{}".format(slug, counter, extension)
+        counter += 1
+    used.add(candidate)
+    return candidate
+
+
+def cmd_export(args):
+    notes = load_store(args.db)["notes"]
+    out_dir = os.path.abspath(args.outdir)
+    try:
+        os.makedirs(out_dir, exist_ok=True)
+    except OSError as exc:
+        die("cannot create {}: {}".format(args.outdir, exc))
+    is_html = args.format == "html"
+    renderer = render_html if is_html else render_markdown
+    ext = "html" if is_html else "md"
+    used = set()
+    index = ["# notebox export", ""]
+    for note in notes:
+        name = safe_filename(note["title"], ext, used)
+        with open(os.path.join(out_dir, name), "w", encoding="utf-8") as handle:
+            handle.write(renderer(note))
+        index.append("- [{}]({})".format(note["title"], name))
+    index.append("")
+    if is_html:
+        body = "\n".join(
+            ["<!DOCTYPE html>", '<html lang="en"><head><meta charset="utf-8">',
+             "<title>notebox export</title></head><body>", "<h1>notebox export</h1>", "<ul>"] +
+            ["<li>{}</li>".format(html.escape(line)) for line in index[2:-1]] +
+            ["</ul>", "</body></html>", ""])
+        index_name = "index.html"
+    else:
+        body = "\n".join(index)
+        index_name = "index.md"
+    with open(os.path.join(out_dir, index_name), "w", encoding="utf-8") as handle:
+        handle.write(body)
+    print("exported {} note(s) to {}".format(len(notes), out_dir))
+
+
+def import_text_file(path):
+    try:
+        with open(path, encoding="utf-8", errors="replace") as handle:
+            text = handle.read()
+    except OSError as exc:
+        die("cannot read {}: {}".format(path, exc))
+    title, tags, body_lines = "", [], []
+    if path.lower().endswith((".md", ".markdown")):
+        for line in text.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("# ") and not title:
+                title = stripped[2:].strip()
+            elif stripped.lower().startswith("tags:"):
+                tags.extend(t for t in stripped[5:].split(","))
+            else:
+                body_lines.append(line)
+    else:
+        title = os.path.splitext(os.path.basename(path))[0]
+        body_lines = text.splitlines()
+    body = "\n".join(body_lines).strip()
+    return title, body, tags
+
+
+def cmd_import(args):
+    sources = []
+    if os.path.isfile(args.path):
+        sources = [args.path]
+    elif os.path.isdir(args.path):
+        for name in sorted(os.listdir(args.path)):
+            full = os.path.join(args.path, name)
+            if os.path.isfile(full) and name.lower().endswith(TEXT_SUFFIXES):
+                sources.append(full)
+    else:
+        die("file or directory not found: {}".format(args.path))
+    store = load_store(args.db)
+    imported = 0
+    for path in sources:
+        title, body, tags = import_text_file(path)
+        if not body and not title:
+            continue
+        create_note(store, title, body, tags)
+        imported += 1
+    save_store(args.db, store)
+    print("imported {} note(s)".format(imported))
+
+
+def cmd_stats(args):
+    notes = load_store(args.db)["notes"]
+    tags = {tag for note in notes for tag in note["tags"]}
+    print("notes: {}".format(len(notes)))
+    print("tags: {}".format(len(tags)))
+    print("with tags: {}".format(sum(1 for n in notes if n["tags"])))
+
+
+def build_parser():
+    db_parent = argparse.ArgumentParser(add_help=False)
+    db_parent.add_argument("--db", default=argparse.SUPPRESS,
+                           help="path to the JSON store (default: ~/.local/share/notebox/notes.json)")
+    parser = argparse.ArgumentParser(
+        prog=APP,
+        description="A local notebook CLI with tags, search and text exports.",
+    )
+    parser.add_argument("--version", action="version", version="{} {}".format(APP, VERSION))
+    parser.add_argument("--db", default=None, help=argparse.SUPPRESS)
+    subs = parser.add_subparsers(dest="command", required=True)
+
+    p = subs.add_parser("add", parents=[db_parent], help="add a note")
+    p.add_argument("text", nargs="+")
+    p.add_argument("--title")
+    p.add_argument("--tags", help="comma-separated tags")
+    p.set_defaults(func=cmd_add)
+
+    p = subs.add_parser("edit", parents=[db_parent], help="replace a note's body")
+    p.add_argument("id")
+    p.add_argument("text", nargs="+")
+    p.set_defaults(func=cmd_edit)
+
+    p = subs.add_parser("rm", parents=[db_parent], help="remove a note")
+    p.add_argument("id")
+    p.set_defaults(func=cmd_rm)
+
+    p = subs.add_parser("list", parents=[db_parent], help="list notes")
+    p.add_argument("--tag")
+    p.add_argument("--limit", type=int)
+    p.set_defaults(func=cmd_list)
+
+    p = subs.add_parser("show", parents=[db_parent], help="show a note")
+    p.add_argument("id")
+    p.set_defaults(func=cmd_show)
+
+    p = subs.add_parser("search", parents=[db_parent], help="search notes")
+    p.add_argument("query")
+    p.set_defaults(func=cmd_search)
+
+    p = subs.add_parser("tag", parents=[db_parent], help="add tags to a note")
+    p.add_argument("id")
+    p.add_argument("tags", nargs="+")
+    p.set_defaults(func=cmd_tag)
+
+    p = subs.add_parser("export", parents=[db_parent], help="export notes to files")
+    p.add_argument("outdir")
+    p.add_argument("--format", choices=("md", "html"), default="md")
+    p.set_defaults(func=cmd_export)
+
+    p = subs.add_parser("import", parents=[db_parent], help="import a text file or directory")
+    p.add_argument("path")
+    p.set_defaults(func=cmd_import)
+
+    p = subs.add_parser("stats", parents=[db_parent], help="show note statistics")
+    p.set_defaults(func=cmd_stats)
+    return parser
+
+
+def main(argv=None):
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    args.db = args.db or DEFAULT_DB
+    args.func(args)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

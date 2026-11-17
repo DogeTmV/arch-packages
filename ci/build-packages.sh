@@ -23,6 +23,14 @@ for name in "${selected[@]}"; do
   rm -rf "$srcdir"
   mkdir -p "$srcdir"
   cp "/work/packages/$name/PKGBUILD" "$srcdir/PKGBUILD"
+
+  # Projects whose source lives in this repository are packed into a local
+  # source tarball next to the PKGBUILD.  Their PKGBUILDs declare
+  # source=("local-source.tar.gz") and sha256sums=('SKIP').
+  if [[ -d "/work/projects/$name" ]]; then
+    tar -czf "$srcdir/local-source.tar.gz" -C /work/projects "$name"
+  fi
+
   echo "Building $name..."
   (cd "$srcdir" && makepkg --noconfirm --clean)
   for pkg in "$srcdir"/*.pkg.tar.zst; do

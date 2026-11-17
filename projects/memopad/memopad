@@ -1,0 +1,280 @@
+#!/usr/bin/env python3
+"""memopad - a pocket-sized memo database CLI inspired by Palm Memo Pad.
+
+State is a single JSON file with deterministic IDs, categories and timestamps.
+"""
+
+import argparse
+import csv
+import json
+import os
+import sys
+from collections import Counter
+from datetime import datetime, timezone
+from pathlib import Path
+
+VERSION = "0.1.0"
+DEFAULT_DB = Path.home() / ".local" / "share" / "memopad" / "memopad.json"
+FIELDS = ("id", "text", "category", "created", "updated")
+
+
+class MemopadError(Exception):
+    """A user-facing error raised by memo operations."""
+
+
+def extract_db(argv):
+    """Accept --db PATH / --db=PATH anywhere on the command line."""
+    rest, value = [], None
+    i = 0
+    while i < len(argv):
+        if argv[i] == "--db" and i + 1 < len(argv):
+            value = argv[i + 1]
+            i += 2
+        elif argv[i].startswith("--db="):
+            value = argv[i].split("=", 1)[1]
+            i += 1
+        else:
+            rest.append(argv[i])
+            i += 1
+    return rest, value
+
+
+def now():
+    return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def empty_state():
+    return {"version": 1, "next_id": 1, "memos": []}
+
+
+def load_state(path):
+    if not path.is_file():
+        return empty_state()
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError) as exc:
+        raise MemopadError("cannot read database '%s': %s" % (path, exc)) from exc
+    if not isinstance(data, dict) or not isinstance(data.get("memos"), list):
+        raise MemopadError("database '%s' has an invalid format" % path)
+    ids = [m.get("id") for m in data["memos"] if isinstance(m.get("id"), int)]
+    data["next_id"] = max([data.get("next_id", 1)] + ids + [1])
+    return data
+
+
+def save_state(path, state):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp = path.with_suffix(path.suffix + ".tmp")
+    with open(temp, "w", encoding="utf-8") as fh:
+        json.dump(state, fh, indent=2, ensure_ascii=False)
+        fh.write("\n")
+    os.replace(temp, path)
+
+
+def find_memo(state, ident):
+    try:
+        number = int(ident)
+    except (TypeError, ValueError) as exc:
+        raise MemopadError("invalid memo id: %s" % ident) from exc
+    for memo in state["memos"]:
+        if memo["id"] == number:
+            return memo
+    raise MemopadError("no memo with id %d" % number)
+
+
+def make_memo(memo_id, text, category, created=None, updated=None):
+    stamp = now()
+    return {
+        "id": memo_id,
+        "text": str(text),
+        "category": (category or "General").strip() or "General",
+        "created": created or stamp,
+        "updated": updated or created or stamp,
+    }
+
+
+def format_memo(memo):
+    return "%d\t[%s]\t%s" % (memo["id"], memo["category"], memo["text"])
+
+
+def load_import(path):
+    """Import our own exported JSON or CSV (and plain lists of memos)."""
+    with open(path, newline="", encoding="utf-8") as fh:
+        sample = fh.read(4096)
+        fh.seek(0)
+        if sample.lstrip().startswith(("{", "[")):
+            try:
+                data = json.load(fh)
+            except ValueError as exc:
+                raise MemopadError("invalid JSON import: %s" % exc) from exc
+            rows = data["memos"] if isinstance(data, dict) else data
+        else:
+            rows = list(csv.DictReader(fh))
+    if not isinstance(rows, list):
+        raise MemopadError("unrecognised import format: %s" % path)
+
+    state, used = empty_state(), set()
+    stamp = now()
+    for row in rows:
+        if not isinstance(row, dict):
+            raise MemopadError("invalid memo record in import: %r" % (row,))
+        raw_id = row.get("id")
+        try:
+            ident = int(raw_id)
+        except (TypeError, ValueError):
+            ident = 0
+        if ident <= 0 or ident in used:
+            ident = state["next_id"]
+        used.add(ident)
+        state["next_id"] = max(state["next_id"], ident + 1)
+        state["memos"].append(make_memo(
+            ident,
+            row.get("text", ""),
+            row.get("category"),
+            row.get("created") or stamp,
+            row.get("updated") or stamp,
+        ))
+    return state
+
+
+def export_txt(state, path):
+    lines = []
+    for memo in sorted(state["memos"], key=lambda m: m["id"]):
+        lines.append("%d | [%s] | %s" % (memo["id"], memo["category"], memo["text"]))
+    Path(path).write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
+
+
+def export_csv(state, path):
+    with open(path, "w", newline="", encoding="utf-8") as fh:
+        writer = csv.DictWriter(fh, fieldnames=FIELDS, lineterminator="\n")
+        writer.writeheader()
+        for memo in sorted(state["memos"], key=lambda m: m["id"]):
+            writer.writerow({key: memo.get(key, "") for key in FIELDS})
+
+
+def build_parser():
+    parser = argparse.ArgumentParser(
+        prog="memopad",
+        description="A tiny categorized memo database with JSON, CSV and text export.",
+        epilog="Global option --db PATH may be given before or after the "
+               "subcommand. Default: ~/.local/share/memopad/memopad.json",
+    )
+    parser.add_argument("--db", metavar="PATH", help="path to the JSON database")
+    parser.add_argument("--version", action="version", version="memopad " + VERSION)
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    p = sub.add_parser("add", help="store a new memo")
+    p.add_argument("text", nargs="+")
+    p.add_argument("--category", metavar="NAME")
+    p = sub.add_parser("list", help="list memos")
+    p.add_argument("--category", metavar="NAME")
+    p.add_argument("--limit", type=int, metavar="N")
+    p = sub.add_parser("show", help="show one memo in full")
+    p.add_argument("id")
+    p = sub.add_parser("edit", help="replace a memo's text")
+    p.add_argument("id")
+    p.add_argument("text", nargs="+")
+    p = sub.add_parser("rm", help="delete a memo (its id is never reused)")
+    p.add_argument("id")
+    p = sub.add_parser("category", help="move a memo to a category")
+    p.add_argument("id")
+    p.add_argument("name")
+    sub.add_parser("categories", help="list categories and counts")
+    p = sub.add_parser("search", help="case-insensitive search in text and category")
+    p.add_argument("query")
+    p = sub.add_parser("export", help="export all memos")
+    p.add_argument("file")
+    p.add_argument("--format", choices=("txt", "csv", "json"), default="txt")
+    p = sub.add_parser("import", help="import memopad JSON or CSV")
+    p.add_argument("file")
+    sub.add_parser("stats", help="show memo and category counts")
+    return parser
+
+
+def dispatch(opts, db_path):
+    cmd = opts.command
+    state = load_state(db_path)
+
+    if cmd == "add":
+        memo = make_memo(state["next_id"], " ".join(opts.text), opts.category)
+        state["next_id"] += 1
+        state["memos"].append(memo)
+        save_state(db_path, state)
+        print("Added memo %d: %s" % (memo["id"], memo["text"]))
+    elif cmd == "list":
+        memos = state["memos"]
+        if opts.category:
+            wanted = opts.category.lower()
+            memos = [m for m in memos if m["category"].lower() == wanted]
+        if opts.limit is not None:
+            if opts.limit < 0:
+                raise MemopadError("--limit cannot be negative")
+            memos = memos[:opts.limit]
+        for memo in sorted(memos, key=lambda m: m["id"]):
+            print(format_memo(memo))
+    elif cmd == "show":
+        memo = find_memo(state, opts.id)
+        print("id: %d\ncategory: %s\ncreated: %s\nupdated: %s\ntext: %s" % (
+            memo["id"], memo["category"], memo["created"], memo["updated"], memo["text"]))
+    elif cmd == "edit":
+        memo = find_memo(state, opts.id)
+        memo["text"] = " ".join(opts.text)
+        memo["updated"] = now()
+        save_state(db_path, state)
+        print("Updated memo %d" % memo["id"])
+    elif cmd == "rm":
+        memo = find_memo(state, opts.id)
+        state["memos"] = [m for m in state["memos"] if m["id"] != memo["id"]]
+        save_state(db_path, state)
+        print("Removed memo %d" % memo["id"])
+    elif cmd == "category":
+        memo = find_memo(state, opts.id)
+        memo["category"] = (opts.name.strip() or "General")
+        memo["updated"] = now()
+        save_state(db_path, state)
+        print("Memo %d moved to '%s'" % (memo["id"], memo["category"]))
+    elif cmd == "categories":
+        counts = Counter(m["category"] for m in state["memos"])
+        for name, count in sorted(counts.items(), key=lambda item: item[0].lower()):
+            print("%s\t%d" % (name, count))
+    elif cmd == "search":
+        needle = opts.query.lower()
+        for memo in sorted(state["memos"], key=lambda m: m["id"]):
+            if needle in (memo["text"] + "\n" + memo["category"]).lower():
+                print(format_memo(memo))
+    elif cmd == "export":
+        if opts.format == "json":
+            save_state(Path(opts.file), state)
+        elif opts.format == "csv":
+            export_csv(state, opts.file)
+        else:
+            export_txt(state, opts.file)
+        print("Exported %d memos to %s (%s)" % (
+            len(state["memos"]), opts.file, opts.format))
+    elif cmd == "import":
+        incoming = load_import(opts.file)
+        save_state(db_path, incoming)
+        print("Imported %d memos from %s" % (len(incoming["memos"]), opts.file))
+    elif cmd == "stats":
+        stamps = [m["created"] for m in state["memos"]]
+        print("Memos: %d" % len(state["memos"]))
+        print("Categories: %d" % len({m["category"] for m in state["memos"]}))
+        print("Oldest: %s" % (min(stamps) if stamps else "n/a"))
+        print("Newest: %s" % (max(stamps) if stamps else "n/a"))
+
+
+def main(argv=None):
+    argv = list(sys.argv[1:] if argv is None else argv)
+    argv, database = extract_db(argv)
+    parser = build_parser()
+    opts = parser.parse_args(argv)
+    db_path = Path(database).expanduser() if database else DEFAULT_DB
+    try:
+        dispatch(opts, db_path)
+    except (MemopadError, OSError, ValueError) as exc:
+        parser.exit(2, "memopad: error: %s\n" % exc)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

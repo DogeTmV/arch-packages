@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>Pipeline Test Feed</title>
+    <link>https://example.org/pipeline</link>
+    <description>Fixture used by pipeway offline tests</description>
+    <item>
+      <title>Alpha Beta</title>
+      <link>https://example.org/a</link>
+      <description>cat news</description>
+      <guid>guid-a</guid>
+      <pubDate>Mon, 01 Jan 2024 00:00:00 GMT</pubDate>
+    </item>
+    <item>
+      <title>Gamma</title>
+      <link>https://example.org/b</link>
+      <description>dog news</description>
+      <guid>guid-b</guid>
+      <pubDate>Tue, 02 Jan 2024 00:00:00 GMT</pubDate>
+    </item>
+    <item>
+      <title>Alpha Delta</title>
+      <link>https://example.org/c</link>
+      <description>cat followup</description>
+      <guid>guid-c</guid>
+      <pubDate>Wed, 03 Jan 2024 00:00:00 GMT</pubDate>
+    </item>
+  </channel>
+</rss>

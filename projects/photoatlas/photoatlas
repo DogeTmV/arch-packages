@@ -1,0 +1,297 @@
+#!/usr/bin/env python3
+"""photoatlas - index local photos and generate a static offline gallery."""
+
+import argparse
+import hashlib
+import html
+import json
+import os
+import sys
+import tempfile
+
+VERSION = "0.1.0"
+DEFAULT_DB = os.path.expanduser("~/.local/share/photoatlas/index.json")
+CHUNK = 64 * 1024
+SOF_MARKERS = set(range(0xC0, 0xC4)) | set(range(0xC5, 0xC8)) | set(range(0xC9, 0xCC)) | set(range(0xCD, 0xD0))
+
+
+# ---------------------------------------------------------------------------
+# File inspection
+# ---------------------------------------------------------------------------
+
+def file_hashes(path):
+    """Two-phase hashing: a quick 64 KiB digest plus the full SHA-256."""
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        head = handle.read(CHUNK)
+        digest.update(head)
+        partial = digest.hexdigest()
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(block)
+    return partial, digest.hexdigest()
+
+
+def jpeg_dimensions(path):
+    """Return (width, height) from a JPEG SOF marker, or (None, None)."""
+    try:
+        with open(path, "rb") as handle:
+            data = handle.read()
+    except OSError:
+        return None, None
+    if not data.startswith(b"\xff\xd8"):
+        return None, None
+    pos = 2
+    while pos + 4 <= len(data):
+        if data[pos] != 0xFF:
+            pos += 1
+            continue
+        marker = data[pos + 1]
+        pos += 2
+        if marker in (0xD8, 0xD9) or 0xD0 <= marker <= 0xD7:
+            continue
+        if pos + 2 > len(data):
+            break
+        length = int.from_bytes(data[pos:pos + 2], "big")
+        if length < 2:
+            break
+        if marker in SOF_MARKERS and length >= 7:
+            height = int.from_bytes(data[pos + 3:pos + 5], "big")
+            width = int.from_bytes(data[pos + 5:pos + 7], "big")
+            return width, height
+        pos += length
+    return None, None
+
+
+def build_entry(path):
+    stat = os.stat(path)
+    partial, full = file_hashes(path)
+    width, height = (None, None)
+    if os.path.splitext(path)[1].lower() in (".jpg", ".jpeg"):
+        width, height = jpeg_dimensions(path)
+    return {
+        "path": path,
+        "size": stat.st_size,
+        "mtime": stat.st_mtime,
+        "partial_sha256": partial,
+        "sha256": full,
+        "width": width,
+        "height": height,
+        "tags": [],
+    }
+
+
+# ---------------------------------------------------------------------------
+# State
+# ---------------------------------------------------------------------------
+
+def empty_index():
+    return {"version": 1, "root": None, "photos": []}
+
+
+def load_state(path):
+    if not os.path.exists(path):
+        return empty_index()
+    try:
+        with open(path, encoding="utf-8") as handle:
+            state = json.load(handle)
+        if not isinstance(state, dict) or not isinstance(state.get("photos"), list):
+            raise ValueError("unrecognised index file")
+        return state
+    except (OSError, ValueError) as exc:
+        raise RuntimeError("cannot read index: %s" % exc) from exc
+
+
+def save_state(path, state):
+    parent = os.path.dirname(os.path.abspath(path))
+    os.makedirs(parent, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=parent, prefix=".photoatlas-")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(state, handle, indent=2, sort_keys=True)
+            handle.write("\n")
+        os.replace(tmp, path)
+    except BaseException:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+        raise
+
+
+def duplicate_groups(state):
+    groups = {}
+    for entry in state["photos"]:
+        groups.setdefault(entry["sha256"], []).append(entry["path"])
+    return [paths for paths in groups.values() if len(paths) > 1]
+
+
+def dimensions_label(entry):
+    if entry.get("width") and entry.get("height"):
+        return "%dx%d" % (entry["width"], entry["height"])
+    return "?"
+
+
+# ---------------------------------------------------------------------------
+# Commands
+# ---------------------------------------------------------------------------
+
+def cmd_index(args, state, db):
+    root = os.path.abspath(args.dir)
+    if not os.path.isdir(root):
+        print("photoatlas: not a directory: %s" % args.dir, file=sys.stderr)
+        return 1
+    old_tags = {e["path"]: e.get("tags", []) for e in state["photos"]}
+    entries = []
+    for directory, _dirs, files in os.walk(root):
+        for name in sorted(files):
+            path = os.path.abspath(os.path.join(directory, name))
+            entry = build_entry(path)
+            entry["tags"] = old_tags.get(path, [])
+            entries.append(entry)
+    entries.sort(key=lambda e: e["path"])
+    state["photos"] = entries
+    state["root"] = root
+    save_state(db, state)
+    print("Indexed %d photos in %s" % (len(entries), root))
+    return 0
+
+
+def cmd_list(args, state, db):
+    if not state["photos"]:
+        print("Index is empty.")
+        return 0
+    for entry in state["photos"]:
+        tags = " ".join("#" + t for t in entry.get("tags", []))
+        line = "%s  %d bytes  %s  %s" % (
+            entry["path"], entry["size"], dimensions_label(entry), tags)
+        print(line.rstrip())
+    return 0
+
+
+def cmd_duplicates(args, state, db):
+    groups = duplicate_groups(state)
+    if not groups:
+        print("No duplicates.")
+        return 0
+    for group in groups:
+        print("Duplicate group:")
+        for path in group:
+            print("  %s" % path)
+    return 0
+
+
+def cmd_gallery(args, state, db):
+    out = os.path.abspath(args.outdir)
+    os.makedirs(out, exist_ok=True)
+    title = html.escape(args.title or "Photo Atlas")
+    pieces = [
+        "<!DOCTYPE html>", '<html lang="en">', "<head>",
+        '<meta charset="utf-8">',
+        '<meta name="viewport" content="width=device-width, initial-scale=1">',
+        "<title>%s</title>" % title,
+        "<style>",
+        "body{margin:0;padding:2rem;background:#18181b;color:#f4f4f5;"
+        "font-family:sans-serif}",
+        "h1{font-weight:400}", ".grid{display:flex;flex-wrap:wrap;gap:1rem}",
+        ".grid a{color:inherit;text-decoration:none}",
+        "img{max-width:240px;max-height:240px;border-radius:4px;display:block}",
+        "figcaption{font-size:.8rem;padding:.3rem 0;color:#a1a1aa}",
+        "</style>", "</head>", "<body>",
+        "<h1>%s</h1>" % title, '<div class="grid">',
+    ]
+    for entry in state["photos"]:
+        rel = os.path.relpath(entry["path"], out).replace(os.sep, "/")
+        url = html.escape(rel, quote=True)
+        caption = html.escape(os.path.basename(entry["path"]))
+        pieces.append('<figure><a href="%s"><img src="%s" alt="%s" '
+                      'loading="lazy"></a><figcaption>%s</figcaption></figure>' % (
+                          url, url, caption, caption))
+    pieces.extend(["</div>", "<p>%d photos</p>" % len(state["photos"]),
+                   "</body>", "</html>", ""])
+    with open(os.path.join(out, "index.html"), "w", encoding="utf-8") as handle:
+        handle.write("\n".join(pieces))
+    print("Wrote gallery to %s (%d photos)" % (out, len(state["photos"])))
+    return 0
+
+
+def cmd_tag(args, state, db):
+    path = os.path.abspath(args.path)
+    entry = next((e for e in state["photos"] if e["path"] == path), None)
+    if entry is None:
+        print("photoatlas: path is not indexed: %s" % args.path, file=sys.stderr)
+        return 1
+    if args.tag not in entry.setdefault("tags", []):
+        entry["tags"].append(args.tag)
+    save_state(db, state)
+    print("Tagged %s with %s" % (path, args.tag))
+    return 0
+
+
+def cmd_find(args, state, db):
+    matches = [e for e in state["photos"] if args.tag in e.get("tags", [])]
+    if not matches:
+        print("No matches for tag '%s'." % args.tag)
+        return 0
+    for entry in matches:
+        print(entry["path"])
+    return 0
+
+
+def cmd_stats(args, state, db):
+    tagged = sum(1 for e in state["photos"] if e.get("tags"))
+    print("Photos: %d" % len(state["photos"]))
+    print("Total bytes: %d" % sum(e["size"] for e in state["photos"]))
+    print("Tagged: %d" % tagged)
+    print("Duplicate groups: %d" % len(duplicate_groups(state)))
+    return 0
+
+
+COMMANDS = {
+    "index": cmd_index, "list": cmd_list, "duplicates": cmd_duplicates,
+    "gallery": cmd_gallery, "tag": cmd_tag, "find": cmd_find, "stats": cmd_stats,
+}
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
+def build_parser():
+    parser = argparse.ArgumentParser(
+        prog="photoatlas", description="Index photos and build static galleries")
+    parser.add_argument("--version", action="version", version="photoatlas " + VERSION)
+    parser.add_argument("--db", metavar="PATH", help="index file location")
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument("--db", metavar="PATH", default=argparse.SUPPRESS,
+                        help="index file location")
+    subs = parser.add_subparsers(dest="command", required=True)
+    specs = {
+        "index": (("dir",), "index all files under a directory"),
+        "list": ((), "list indexed photos"),
+        "duplicates": ((), "group photos with identical content"),
+        "gallery": (("outdir",), "write a static HTML gallery"),
+        "tag": (("path", "tag"), "attach a tag to a photo"),
+        "find": (("tag",), "list photos carrying a tag"),
+        "stats": ((), "show index statistics"),
+    }
+    for name, (positionals, help_text) in specs.items():
+        sub = subs.add_parser(name, help=help_text, parents=[common])
+        for pos in positionals:
+            sub.add_argument(pos, help=pos)
+        if name == "gallery":
+            sub.add_argument("--title", metavar="TEXT", default="Photo Atlas",
+                             help="gallery heading")
+    return parser
+
+
+def main(argv=None):
+    args = build_parser().parse_args(argv)
+    db = getattr(args, "db", None) or os.environ.get("PHOTOATLAS_DB") or DEFAULT_DB
+    try:
+        state = load_state(db)
+    except RuntimeError as exc:
+        print("photoatlas: %s" % exc, file=sys.stderr)
+        return 1
+    return COMMANDS[args.command](args, state, db)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

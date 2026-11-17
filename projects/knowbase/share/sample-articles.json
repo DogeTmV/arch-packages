@@ -1,0 +1,50 @@
+[
+  {
+    "title": "Day and Night",
+    "body": "Day and night happen because our planet spins on its axis. The side turned toward the Sun is lit; the opposite side is in shadow. One full turn takes about twenty-four hours.",
+    "tags": ["astronomy", "earth"],
+    "see_also": ["Tides", "Rainbows"]
+  },
+  {
+    "title": "Tides",
+    "body": "Ocean waters rise and fall mainly because the Moon pulls on Earth. The Sun adds a smaller pull, so tides are strongest when both bodies line up. Coastlines shape when and how high the water arrives.",
+    "tags": ["ocean", "astronomy"],
+    "see_also": ["Day and Night", "Maps"]
+  },
+  {
+    "title": "Rainbows",
+    "body": "A rainbow appears when sunlight enters tiny drops of water and bends, then reflects inside them. Different colours bend by slightly different amounts, so white light spreads into a band. You usually see one opposite the Sun.",
+    "tags": ["light", "weather"],
+    "see_also": ["Sound", "Day and Night"]
+  },
+  {
+    "title": "Sleep",
+    "body": "Sleep is a state in which the body rests and the brain keeps working quietly. It cycles between lighter and deeper stages, and many animals have their own patterns. Regular timing tends to make sleep more refreshing.",
+    "tags": ["biology", "health"],
+    "see_also": ["Seeds"]
+  },
+  {
+    "title": "Photosynthesis",
+    "body": "Plants use sunlight to turn water and carbon dioxide into sugar, releasing oxygen as a by-product. Chlorophyll captures the light that powers this process. The sugar fuels growth and storage.",
+    "tags": ["biology", "plants"],
+    "see_also": ["Seeds", "Sleep"]
+  },
+  {
+    "title": "Maps",
+    "body": "A map is a drawing of a place that helps people find their way. Symbols stand for roads, water, mountains or cities, and a scale relates the drawing to real distances. Every map leaves some details out on purpose.",
+    "tags": ["geography", "tools"],
+    "see_also": ["Tides", "Sound"]
+  },
+  {
+    "title": "Sound",
+    "body": "Sound travels as vibrations through air, water or solid material. Faster vibrations sound higher, while larger vibrations sound louder. In a vacuum there is no material to carry the vibration, so no sound passes.",
+    "tags": ["physics", "light"],
+    "see_also": ["Rainbows", "Maps"]
+  },
+  {
+    "title": "Seeds",
+    "body": "A seed packages a young plant with a supply of food and a protective coat. It can wait until conditions are right, then sprout roots and a shoot. Wind, water and animals all help seeds travel.",
+    "tags": ["plants", "biology"],
+    "see_also": ["Photosynthesis", "Sleep"]
+  }
+]

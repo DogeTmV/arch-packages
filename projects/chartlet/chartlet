@@ -1,0 +1,302 @@
+#!/usr/bin/env python3
+"""chartlet - turn CSV data into simple, self-contained SVG charts."""
+
+import argparse
+import csv
+import math
+import re
+import sys
+import xml.etree.ElementTree as ET
+
+VERSION = "0.1.0"
+SVG_NS = "http://www.w3.org/2000/svg"
+NS = "{" + SVG_NS + "}"
+PALETTE = ("#3568b4", "#d1493f", "#2f9e6e", "#e2a227", "#7a53a6", "#3aa3ad")
+
+
+class ChartError(Exception):
+    """An error that should be reported to the user without a traceback."""
+
+
+def add_common(parser, *, pie=False):
+    if not pie:
+        parser.add_argument("--title", default=None, help="chart title")
+        parser.add_argument("--x", default=None, metavar="COLUMN", help="category column (name or 1-based index)")
+        parser.add_argument("--y", default=None, metavar="COLUMN", help="numeric column (name or 1-based index)")
+        parser.add_argument("--width", type=int, default=800, metavar="N", help="canvas width (default: 800)")
+        parser.add_argument("--height", type=int, default=500, metavar="N", help="canvas height (default: 500)")
+        parser.add_argument("--color", default=None, metavar="HEX", help="series colour, e.g. #3568b4")
+    else:
+        parser.add_argument("--title", default=None, help="chart title")
+        parser.add_argument("--label", default=None, metavar="COLUMN", help="slice label column")
+        parser.add_argument("--value", default=None, metavar="COLUMN", help="numeric slice value column")
+
+
+def build_parser():
+    parser = argparse.ArgumentParser(
+        prog="chartlet", description="Draw SVG charts from CSV files (standard library only)."
+    )
+    parser.add_argument("--version", action="version", version=f"chartlet {VERSION}")
+    subs = parser.add_subparsers(dest="command", required=True)
+    for name, help_text in (("bar", "draw a bar chart"), ("line", "draw a line chart"),
+                            ("pie", "draw a pie chart"), ("sparkline", "draw a compact sparkline")):
+        sub = subs.add_parser(name, help=help_text)
+        sub.add_argument("csv", help="input CSV file")
+        sub.add_argument("out", help="output SVG file")
+        if name == "pie":
+            add_common(sub, pie=True)
+        elif name == "sparkline":
+            sub.add_argument("--value", default=None, metavar="COLUMN", help="numeric column")
+            sub.add_argument("--width", type=int, default=240, metavar="N", help="canvas width (default: 240)")
+            sub.add_argument("--height", type=int, default=60, metavar="N", help="canvas height (default: 60)")
+        else:
+            add_common(sub)
+    return parser
+
+
+def resolve_column(fieldnames, requested, role):
+    if requested is None:
+        return None
+    if requested.isdigit():
+        index = int(requested) - 1
+        if 0 <= index < len(fieldnames):
+            return fieldnames[index]
+        raise ChartError(f"{role} column index {requested} is out of range (CSV has {len(fieldnames)} columns)")
+    if requested in fieldnames:
+        return requested
+    raise ChartError(f"{role} column {requested!r} not found; available columns: {', '.join(fieldnames)}")
+
+
+def read_rows(path, columns):
+    """Return (labels, values) after strict numeric validation of the value column."""
+    label_request, value_request = columns
+    try:
+        with open(path, newline="", encoding="utf-8-sig") as handle:
+            reader = csv.DictReader(handle)
+            fieldnames = reader.fieldnames or []
+            if not fieldnames:
+                raise ChartError(f"CSV file {path!r} has no header row")
+            if value_request is None:
+                value_request = fieldnames[-1]
+            value_col = resolve_column(fieldnames, value_request, "numeric")
+            label_col = resolve_column(fieldnames, label_request, "category")
+            if label_request is None and len(fieldnames) > 1:
+                label_col = next((name for name in fieldnames if name != value_col), None)
+            labels, values = [], []
+            for line_number, row in enumerate(reader, start=2):
+                if not any((cell or "").strip() for cell in row.values() if isinstance(cell, str)):
+                    continue
+                raw = row.get(value_col)
+                if raw is None:
+                    raise ChartError(f"row {line_number}: missing value in column {value_col!r}")
+                text = raw.strip()
+                try:
+                    number = float(text)
+                except ValueError:
+                    raise ChartError(
+                        f"row {line_number}: column {value_col!r} expects a number, got {text!r}"
+                    ) from None
+                if not math.isfinite(number):
+                    raise ChartError(f"row {line_number}: column {value_col!r} must be finite, got {text!r}")
+                labels.append((row.get(label_col) or f"#{line_number - 1}") if label_col else f"#{line_number - 1}")
+                values.append(number)
+    except OSError as exc:
+        raise ChartError(f"cannot read CSV file {path!r}: {exc}") from None
+    if not values:
+        raise ChartError(f"CSV file {path!r} contains no data rows")
+    return labels, values
+
+
+def check_color(value):
+    if value is None:
+        return PALETTE[0]
+    if not re.fullmatch(r"#?[0-9a-fA-F]{6}", value):
+        raise ChartError(f"invalid --color {value!r}; expected six hexadecimal digits (e.g. #3568b4)")
+    return value if value.startswith("#") else "#" + value
+
+
+def check_size(width, height, min_height=80):
+    if width < 120 or width > 5000 or height < min_height or height > 5000:
+        raise ChartError(f"invalid canvas size {width}x{height}; width >= 120 and height >= {min_height} are required")
+    return width, height
+
+
+def text(parent, x, y, content, cls, **extra):
+    node = ET.SubElement(parent, NS + "text", {"x": str(x), "y": str(y), "class": cls, **extra})
+    node.text = str(content)
+    return node
+
+
+def line(parent, x1, y1, x2, y2, cls):
+    return ET.SubElement(
+        parent, NS + "line",
+        {"x1": str(x1), "y1": str(y1), "x2": str(x2), "y2": str(y2), "class": cls},
+    )
+
+
+def new_svg(width, height, title=None):
+    ET.register_namespace("", SVG_NS)
+    root = ET.Element(
+        NS + "svg",
+        {"width": str(width), "height": str(height),
+         "viewBox": f"0 0 {width} {height}", "version": "1.1"},
+    )
+    if title:
+        text(root, width / 2, 30, title, "title", **{"text-anchor": "middle", "font-size": "20"})
+    return root
+
+
+def write_svg(path, root):
+    try:
+        ET.ElementTree(root).write(path, encoding="utf-8", xml_declaration=True)
+    except OSError as exc:
+        raise ChartError(f"cannot write SVG file {path!r}: {exc}") from None
+
+
+def draw_axes(root, width, height, top, bottom, left, right, max_value):
+    baseline = height - bottom
+    line(root, left, top, left, baseline, "axis")
+    line(root, left, baseline, width - right, baseline, "axis")
+    for i in range(1, 6):
+        y = baseline - (baseline - top) * i / 5
+        line(root, left, y, width - right, y, "gridline")
+        text(root, left - 8, y + 4, f"{max_value * i / 5:.2f}", "y-label",
+             **{"text-anchor": "end", "font-size": "11"})
+    return baseline
+
+
+def add_legend(root, width, right, color, caption):
+    legend = ET.SubElement(root, NS + "g", {"class": "legend"})
+    ET.SubElement(legend, NS + "rect", {
+        "x": str(width - right - 90), "y": "10", "width": "12", "height": "12", "fill": color,
+    })
+    text(legend, width - right - 72, 20, caption, "legend-label", **{"font-size": "11"})
+    return legend
+
+
+def draw_bar(args):
+    width, height = check_size(args.width, args.height)
+    labels, values = read_rows(args.csv, (args.x, args.y))
+    color = check_color(args.color)
+    root = new_svg(width, height, args.title)
+    left, right, top, bottom = 60, 20, 50 if args.title else 20, 60
+    scale = max(abs(v) for v in values) or 1.0
+    baseline = draw_axes(root, width, height, top, bottom, left, right, scale)
+    slot = (width - left - right) / len(values)
+    bar_width = slot * 0.7
+    for i, (label, value) in enumerate(zip(labels, values)):
+        bar_height = abs(value) / scale * (baseline - top)
+        x = left + slot * i + (slot - bar_width) / 2
+        y = baseline - bar_height if value >= 0 else baseline
+        ET.SubElement(root, NS + "rect", {
+            "x": f"{x:.3f}", "y": f"{y:.3f}", "width": f"{bar_width:.3f}",
+            "height": f"{bar_height:.3f}", "fill": color, "class": "bar", "data-label": label,
+        })
+        text(root, x + bar_width / 2, baseline + 18, label, "x-label",
+             **{"text-anchor": "middle", "font-size": "11"})
+    add_legend(root, width, right, color, args.y or "value")
+    write_svg(args.out, root)
+
+
+def draw_line(args):
+    width, height = check_size(args.width, args.height)
+    labels, values = read_rows(args.csv, (args.x, args.y))
+    color = check_color(args.color)
+    root = new_svg(width, height, args.title)
+    left, right, top, bottom = 60, 20, 50 if args.title else 20, 60
+    scale = max(abs(v) for v in values) or 1.0
+    baseline = draw_axes(root, width, height, top, bottom, left, right, scale)
+    plot_width = width - left - right
+    points = []
+    for i, (label, value) in enumerate(zip(labels, values)):
+        x = left + plot_width / 2 if len(values) == 1 else left + plot_width * i / (len(values) - 1)
+        y = baseline - value / scale * (baseline - top)
+        points.append((x, y))
+        text(root, x, baseline + 18, label, "x-label", **{"text-anchor": "middle", "font-size": "11"})
+    ET.SubElement(root, NS + "polyline", {
+        "points": " ".join(f"{x:.3f},{y:.3f}" for x, y in points),
+        "class": "line", "fill": "none", "stroke": color, "stroke-width": "2",
+    })
+    for (x, y), label in zip(points, labels):
+        ET.SubElement(root, NS + "circle", {
+            "cx": f"{x:.3f}", "cy": f"{y:.3f}", "r": "4", "fill": color,
+            "class": "point", "data-label": label,
+        })
+    add_legend(root, width, right, color, args.y or "value")
+    write_svg(args.out, root)
+
+
+def draw_pie(args):
+    labels, values = read_rows(args.csv, (args.label, args.value))
+    if any(value < 0 for value in values) or not any(value > 0 for value in values):
+        raise ChartError("pie slices must be non-negative and at least one value must be positive")
+    width, height = 640, 480
+    root = new_svg(width, height, args.title)
+    cx, cy, radius = 260, 250, 180
+    total = sum(values)
+    angle = -90.0
+    for i, (label, value) in enumerate(zip(labels, values)):
+        sweep = value / total * 360.0
+        color = PALETTE[i % len(PALETTE)]
+        group = ET.SubElement(root, NS + "g", {"class": "slice-group"})
+        if sweep >= 359.999:
+            ET.SubElement(group, NS + "circle", {
+                "cx": str(cx), "cy": str(cy), "r": str(radius), "fill": color, "class": "slice",
+            })
+        else:
+            end = angle + sweep
+            x1, y1 = cx + radius * math.cos(math.radians(angle)), cy + radius * math.sin(math.radians(angle))
+            x2, y2 = cx + radius * math.cos(math.radians(end)), cy + radius * math.sin(math.radians(end))
+            path = ET.SubElement(group, NS + "path", {
+                "d": f"M {cx} {cy} L {x1:.3f} {y1:.3f} A {radius} {radius} 0 "
+                     f"{1 if sweep > 180 else 0} 1 {x2:.3f} {y2:.3f} Z",
+                "fill": color, "class": "slice",
+            })
+            path.set("data-label", label)
+            path.set("data-value", f"{value:g}")
+        angle += sweep
+    legend = ET.SubElement(root, NS + "g", {"class": "legend"})
+    for i, (label, value) in enumerate(zip(labels, values)):
+        y = 120 + i * 28
+        ET.SubElement(legend, NS + "rect", {
+            "x": "480", "y": str(y - 10), "width": "12", "height": "12",
+            "fill": PALETTE[i % len(PALETTE)],
+        })
+        text(legend, 500, y, f"{label} ({value / total * 100:.1f}%)", "legend-label", **{"font-size": "12"})
+    write_svg(args.out, root)
+
+
+def draw_sparkline(args):
+    width, height = check_size(args.width, args.height, min_height=40)
+    _, values = read_rows(args.csv, (None, args.value))
+    root = new_svg(width, height)
+    low, high = min(values), max(values)
+    span = high - low or 1.0
+    pad = 4.0
+    points = []
+    for i, value in enumerate(values):
+        x = pad + (width - 2 * pad) * (i / (len(values) - 1) if len(values) > 1 else 0.5)
+        y = height - pad - (value - low) / span * (height - 2 * pad)
+        points.append((x, y))
+    ET.SubElement(root, NS + "polyline", {
+        "points": " ".join(f"{x:.3f},{y:.3f}" for x, y in points),
+        "class": "sparkline", "fill": "none", "stroke": PALETTE[0], "stroke-width": "1.5",
+    })
+    write_svg(args.out, root)
+
+
+DRAWERS = {"bar": draw_bar, "line": draw_line, "pie": draw_pie, "sparkline": draw_sparkline}
+
+
+def main(argv=None):
+    args = build_parser().parse_args(argv)
+    try:
+        DRAWERS[args.command](args)
+    except ChartError as exc:
+        print(f"chartlet: error: {exc}", file=sys.stderr)
+        return 2
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

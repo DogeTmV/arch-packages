@@ -9,6 +9,7 @@ on:
     branches: [main]
     paths:
       - 'packages/**'
+      - 'projects/**'
       - 'ci/**'
       - '.github/workflows/publish.yml'
   workflow_dispatch:

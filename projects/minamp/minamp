@@ -1,0 +1,357 @@
+#!/usr/bin/env python3
+"""minamp - a small playlist-driven audio front-end."""
+
+import argparse
+import json
+import os
+import random
+import shlex
+import subprocess
+import sys
+import tempfile
+
+VERSION = "0.1.0"
+DEFAULT_DB = os.path.expanduser("~/.local/share/minamp/state.json")
+AUDIO_EXTS = {".mp3", ".ogg", ".oga", ".flac", ".wav", ".m4a", ".aac",
+              ".opus", ".wma", ".aiff", ".aif", ".mp2", ".mid", ".midi"}
+
+
+# ---------------------------------------------------------------------------
+# State
+# ---------------------------------------------------------------------------
+
+def empty_state():
+    return {
+        "version": 1, "tracks": [], "next_id": 1, "player": "mpv",
+        "repeat": "off", "shuffle": False, "current": None,
+    }
+
+
+def load_state(path):
+    if not os.path.exists(path):
+        return empty_state()
+    try:
+        with open(path, encoding="utf-8") as handle:
+            state = json.load(handle)
+        if not isinstance(state, dict) or not isinstance(state.get("tracks"), list):
+            raise ValueError("unrecognised state file")
+    except (OSError, ValueError) as exc:
+        raise RuntimeError("cannot read state: %s" % exc) from exc
+    for key, value in empty_state().items():
+        state.setdefault(key, value)
+    return state
+
+
+def save_state(path, state):
+    parent = os.path.dirname(os.path.abspath(path))
+    os.makedirs(parent, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=parent, prefix=".minamp-")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(state, handle, indent=2, sort_keys=True)
+            handle.write("\n")
+        os.replace(tmp, path)
+    except BaseException:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+        raise
+
+
+def parse_id(value):
+    """Normalise a CLI or state track id to an integer when possible."""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return value
+
+
+def find_track(state, track_id):
+    track_id = parse_id(track_id)
+    return next((t for t in state["tracks"] if t["id"] == track_id), None)
+
+
+# ---------------------------------------------------------------------------
+# Queue building
+# ---------------------------------------------------------------------------
+
+def build_queue(state, start_id, seed=0):
+    """Return the ordered list of track IDs for one play invocation."""
+    order = [t["id"] for t in state["tracks"]]
+    if state.get("shuffle"):
+        random.Random(seed).shuffle(order)
+    if state.get("repeat") == "one":
+        return [start_id]
+    index = order.index(start_id)
+    if state.get("repeat") == "all":
+        return order[index:] + order[:index]
+    return order[index:]
+
+
+def build_commands(queue, state, template):
+    """Turn a queue into one or more player argv lists."""
+    paths = [find_track(state, track_id)["path"] for track_id in queue]
+    if "{file}" in template:
+        commands = []
+        for path in paths:
+            expanded = template.replace("{file}", shlex.quote(path))
+            commands.append(shlex.split(expanded))
+        return commands
+    return [shlex.split(template) + paths]
+
+
+# ---------------------------------------------------------------------------
+# Commands
+# ---------------------------------------------------------------------------
+
+def cmd_add(args, state, db):
+    paths = []
+    for raw in args.paths:
+        path = os.path.abspath(raw)
+        if os.path.isfile(path):
+            paths.append(path)
+        elif os.path.isdir(path):
+            if args.recursive:
+                for directory, _dirs, files in os.walk(path):
+                    paths.extend(os.path.abspath(os.path.join(directory, f))
+                                 for f in sorted(files))
+            else:
+                paths.extend(os.path.abspath(os.path.join(path, f))
+                             for f in sorted(os.listdir(path))
+                             if os.path.isfile(os.path.join(path, f)))
+        else:
+            print("minamp: warning: no such path: %s" % raw, file=sys.stderr)
+
+    known = {t["path"] for t in state["tracks"]}
+    added = 0
+    for path in paths:
+        if os.path.splitext(path)[1].lower() not in AUDIO_EXTS or path in known:
+            continue
+        state["tracks"].append({
+            "id": state["next_id"],
+            "path": path,
+            "title": os.path.splitext(os.path.basename(path))[0],
+            "duration": -1,
+        })
+        state["next_id"] += 1
+        known.add(path)
+        added += 1
+    save_state(db, state)
+    print("Added %d track(s)" % added)
+    return 0
+
+
+def cmd_list(args, state, db):
+    if not state["tracks"]:
+        print("Playlist is empty.")
+        return 0
+    for track in state["tracks"]:
+        marker = "*" if track["id"] == state.get("current") else " "
+        print("%s%d  %s  %s" % (marker, track["id"], track["title"], track["path"]))
+    return 0
+
+
+def cmd_rm(args, state, db):
+    track = find_track(state, args.id)
+    if track is None:
+        print("minamp: no such track id: %s" % args.id, file=sys.stderr)
+        return 1
+    state["tracks"].remove(track)
+    if state.get("current") == track["id"]:
+        state["current"] = None
+    save_state(db, state)
+    print("Removed %s" % args.id)
+    return 0
+
+
+def cmd_clear(args, state, db):
+    state["tracks"] = []
+    state["current"] = None
+    save_state(db, state)
+    print("Cleared playlist")
+    return 0
+
+
+def cmd_repeat(args, state, db):
+    if args.mode not in ("off", "all", "one"):
+        print("minamp: repeat mode must be off, all or one", file=sys.stderr)
+        return 1
+    state["repeat"] = args.mode
+    save_state(db, state)
+    print("Repeat: %s" % args.mode)
+    return 0
+
+
+def cmd_shuffle(args, state, db):
+    state["shuffle"] = not state.get("shuffle", False)
+    save_state(db, state)
+    print("Shuffle: %s" % ("on" if state["shuffle"] else "off"))
+    return 0
+
+
+def cmd_now(args, state, db):
+    track = find_track(state, state.get("current"))
+    if track is None:
+        print("Nothing playing.")
+        return 0
+    print("Now playing: %s (%s)" % (track["title"], track["path"]))
+    return 0
+
+
+def cmd_play(args, state, db):
+    if not state["tracks"]:
+        print("minamp: playlist is empty", file=sys.stderr)
+        return 1
+    track_id = parse_id(args.id) if args.id is not None else state.get("current")
+    if track_id is None:
+        track_id = state["tracks"][0]["id"]
+    if find_track(state, track_id) is None:
+        print("minamp: no such track id: %s" % track_id, file=sys.stderr)
+        return 1
+    state["current"] = track_id
+    save_state(db, state)
+    template = args.player or state["player"]
+    commands = build_commands(build_queue(state, track_id), state, template)
+    for argv in commands:
+        if args.dry_run:
+            print("DRY-RUN: " + shlex.join(argv))
+        else:
+            try:
+                subprocess.run(argv, check=False)
+            except OSError as exc:
+                print("minamp: warning: cannot run %s: %s" % (argv[0], exc),
+                      file=sys.stderr)
+    return 0
+
+
+def cmd_export(args, state, db):
+    lines = ["#EXTM3U"]
+    for track in state["tracks"]:
+        lines.append("#EXTINF:%d,%s" % (track.get("duration", -1), track["title"]))
+        lines.append(track["path"])
+    parent = os.path.dirname(os.path.abspath(args.playlist))
+    os.makedirs(parent, exist_ok=True)
+    with open(args.playlist, "w", encoding="utf-8") as handle:
+        handle.write("\n".join(lines) + "\n")
+    print("Exported %d track(s) to %s" % (len(state["tracks"]), args.playlist))
+    return 0
+
+
+def cmd_import(args, state, db):
+    try:
+        with open(args.playlist, encoding="utf-8") as handle:
+            lines = handle.read().splitlines()
+    except OSError as exc:
+        print("minamp: cannot read playlist: %s" % exc, file=sys.stderr)
+        return 1
+    known = {t["path"] for t in state["tracks"]}
+    title, duration = None, -1
+    added = 0
+    for line in lines:
+        line = line.strip()
+        if not line or line.startswith("#EXTM3U"):
+            continue
+        if line.startswith("#EXTINF:"):
+            info = line[len("#EXTINF:"):]
+            head, _, label = info.partition(",")
+            try:
+                duration = int(head)
+            except ValueError:
+                duration = -1
+            title = label or None
+            continue
+        if line.startswith("#"):
+            continue
+        path = os.path.abspath(line)
+        if path in known or not os.path.exists(path):
+            title, duration = None, -1
+            continue
+        state["tracks"].append({
+            "id": state["next_id"], "path": path,
+            "title": title or os.path.splitext(os.path.basename(path))[0],
+            "duration": duration,
+        })
+        state["next_id"] += 1
+        known.add(path)
+        added += 1
+        title, duration = None, -1
+    save_state(db, state)
+    print("Imported %d track(s)" % added)
+    return 0
+
+
+def cmd_config(args, state, db):
+    if args.player is not None:
+        if not args.player.strip():
+            print("minamp: player command must not be empty", file=sys.stderr)
+            return 1
+        state["player"] = args.player
+        save_state(db, state)
+    print(json.dumps({
+        "player": state["player"], "repeat": state["repeat"],
+        "shuffle": state["shuffle"], "current": state.get("current"),
+        "tracks": len(state["tracks"]), "db": db,
+    }, indent=2, sort_keys=True))
+    return 0
+
+
+COMMANDS = {
+    "add": cmd_add, "list": cmd_list, "rm": cmd_rm, "clear": cmd_clear,
+    "play": cmd_play, "shuffle": cmd_shuffle, "repeat": cmd_repeat,
+    "now": cmd_now, "export": cmd_export, "import": cmd_import,
+    "config": cmd_config,
+}
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
+def build_parser():
+    parser = argparse.ArgumentParser(
+        prog="minamp", description="Playlist-driven audio front-end")
+    parser.add_argument("--version", action="version", version="minamp " + VERSION)
+    parser.add_argument("--db", metavar="PATH", help="state file location")
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument("--db", metavar="PATH", default=argparse.SUPPRESS,
+                        help="state file location")
+    subs = parser.add_subparsers(dest="command", required=True)
+
+    def sub(name, help_text, *positionals):
+        parser_obj = subs.add_parser(name, help=help_text, parents=[common])
+        for pos in positionals:
+            parser_obj.add_argument(pos)
+        return parser_obj
+
+    add = sub("add", "add audio files or directories")
+    add.add_argument("paths", nargs="+", help="audio files or directories")
+    add.add_argument("--recursive", action="store_true", help="descend into directories")
+    sub("list", "list the playlist")
+    sub("rm", "remove a track by id", "id")
+    sub("clear", "empty the playlist")
+    play = sub("play", "build a player command for a track")
+    play.add_argument("id", nargs="?", help="track id (defaults to current/first)")
+    play.add_argument("--dry-run", action="store_true", help="print the command only")
+    play.add_argument("--player", metavar="CMD", help="override the player template")
+    sub("shuffle", "toggle shuffle mode")
+    sub("repeat", "set repeat mode", "mode")
+    sub("now", "show the current track")
+    sub("export", "export an M3U playlist", "playlist")
+    sub("import", "import an M3U playlist", "playlist")
+    config = sub("config", "show or change configuration")
+    config.add_argument("--player", metavar="CMD", help="set the player template")
+    return parser
+
+
+def main(argv=None):
+    args = build_parser().parse_args(argv)
+    db = getattr(args, "db", None) or os.environ.get("MINAMP_DB") or DEFAULT_DB
+    try:
+        state = load_state(db)
+    except RuntimeError as exc:
+        print("minamp: %s" % exc, file=sys.stderr)
+        return 1
+    return COMMANDS[args.command](args, state, db)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

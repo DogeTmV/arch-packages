@@ -1,0 +1,18 @@
+# Maintainer: DogeTmV
+pkgname=threadweave
+pkgver=0.1.0
+pkgrel=1
+pkgdesc='Offline mbox browser with threaded conversations and HTML export'
+arch=('any')
+url='https://github.com/DogeTmV/arch-packages'
+license=('MIT')
+depends=('python')
+source=("local-source.tar.gz")
+sha256sums=('SKIP')
+
+package() {
+  cd "$pkgname"
+  install -Dm755 "$pkgname" "$pkgdir/usr/bin/$pkgname"
+  install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

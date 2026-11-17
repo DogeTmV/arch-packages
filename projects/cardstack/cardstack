@@ -1,0 +1,326 @@
+#!/usr/bin/env python3
+"""cardstack - a small text card-stack tool inspired by HyperCard.
+
+Each stack is a single JSON file holding stable numeric cards and links.
+Card text may contain [[Wiki Links]] which are resolved on export.
+"""
+
+import argparse
+import html
+import json
+import os
+import re
+import sys
+from datetime import datetime
+from pathlib import Path
+
+VERSION = "0.1.0"
+DEFAULT_DIR = Path.home() / ".local" / "share" / "cardstack" / "stacks"
+WIKI = re.compile(r"\[\[([^\[\]]+)\]\]")
+SAFE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+
+
+class CardstackError(Exception):
+    """An error that should be shown to the user without a traceback."""
+
+
+def extract_dir(argv):
+    """Accept --dir PATH / --dir=PATH anywhere on the command line."""
+    rest, value = [], None
+    i = 0
+    while i < len(argv):
+        if argv[i] == "--dir" and i + 1 < len(argv):
+            value = argv[i + 1]
+            i += 2
+        elif argv[i].startswith("--dir="):
+            value = argv[i].split("=", 1)[1]
+            i += 1
+        else:
+            rest.append(argv[i])
+            i += 1
+    return rest, value
+
+
+def stack_path(root, name):
+    if not SAFE_NAME.match(name):
+        raise CardstackError("invalid stack name: %r" % name)
+    return Path(root) / (name + ".json")
+
+
+def write_json(path, data):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp = path.with_suffix(path.suffix + ".tmp")
+    with open(temp, "w", encoding="utf-8") as fh:
+        json.dump(data, fh, indent=2, ensure_ascii=False)
+        fh.write("\n")
+    os.replace(temp, path)
+
+
+def load_stack(root, name):
+    path = stack_path(root, name)
+    if not path.is_file():
+        raise CardstackError("stack '%s' does not exist" % name)
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError) as exc:
+        raise CardstackError("cannot read stack '%s': %s" % (name, exc)) from exc
+    if not isinstance(data, dict) or "cards" not in data:
+        raise CardstackError("stack '%s' has an invalid format" % name)
+    return data
+
+
+def find_card(stack, ref):
+    """Resolve a numeric id, exact title, or unique partial title."""
+    cards = stack["cards"]
+    if str(ref).isdigit():
+        for card in cards:
+            if card["id"] == int(ref):
+                return card
+        raise CardstackError("no card with id %s" % ref)
+    needle = str(ref).strip().lower()
+    exact = [c for c in cards if c["title"].lower() == needle]
+    if len(exact) == 1:
+        return exact[0]
+    partial = [c for c in cards if needle in c["title"].lower()]
+    if len(partial) == 1:
+        return partial[0]
+    if not partial and not exact:
+        raise CardstackError("no card matching '%s'" % ref)
+    raise CardstackError("card reference '%s' is ambiguous" % ref)
+
+
+def render_text(text, stack, fmt):
+    """Turn card text into HTML or Markdown, resolving [[Wiki Links]]."""
+    pieces, pos = [], 0
+    for match in WIKI.finditer(text):
+        title = match.group(1).strip()
+        pieces.append(html.escape(text[pos:match.start()]) if fmt == "html"
+                      else text[pos:match.start()])
+        try:
+            target = find_card(stack, title)
+        except CardstackError:
+            target = None
+        if target:
+            ident = target["id"]
+            if fmt == "html":
+                pieces.append('<a href="card-%d.html">%s</a>'
+                              % (ident, html.escape(title)))
+            else:
+                pieces.append("[%s](card-%d.md)" % (title, ident))
+        else:
+            pieces.append(html.escape(match.group(0)) if fmt == "html"
+                          else match.group(0))
+        pos = match.end()
+    tail = text[pos:]
+    pieces.append(html.escape(tail) if fmt == "html" else tail)
+    return "".join(pieces).replace("\n", "<br>\n") if fmt == "html" else "".join(pieces)
+
+
+def snippet(card):
+    return card["text"].replace("\n", " ")[:80] or "(empty card)"
+
+
+def export_stack(stack, outdir, fmt):
+    out = Path(outdir)
+    out.mkdir(parents=True, exist_ok=True)
+    title = html.escape(stack["title"]) if fmt == "html" else stack["title"]
+    ext = "html" if fmt == "html" else "md"
+    if fmt == "html":
+        index = ["<!doctype html>", "<html lang=\"en\">", "<head>",
+                 '<meta charset="utf-8">', "<title>%s</title>" % title,
+                 "</head>", "<body>", "<h1>%s</h1>" % title, "<ul>"]
+        for card in sorted(stack["cards"], key=lambda c: c["id"]):
+            label = html.escape(card["title"])
+            index.append('<li><a href="card-%d.%s">%s</a>: %s</li>'
+                         % (card["id"], ext, label, html.escape(snippet(card))))
+        index += ["</ul>", "</body>", "</html>"]
+        (out / "styles.css").write_text(
+            "body{font-family:Georgia,serif;max-width:44em;margin:2em auto;"
+            "padding:0 1em;line-height:1.5}\n", encoding="utf-8")
+    else:
+        index = ["# %s" % title, ""]
+        for card in sorted(stack["cards"], key=lambda c: c["id"]):
+            index.append("- [%s](card-%d.md): %s"
+                         % (card["title"], card["id"], snippet(card)))
+    (out / ("index." + ext)).write_text("\n".join(index) + "\n", encoding="utf-8")
+
+    for card in stack["cards"]:
+        body = render_text(card["text"], stack, fmt)
+        card_title = html.escape(card["title"]) if fmt == "html" else card["title"]
+        if fmt == "html":
+            doc = ["<!doctype html>", "<html lang=\"en\">", "<head>",
+                   '<meta charset="utf-8">', "<title>%s</title>" % card_title,
+                   "</head>", "<body>", "<h1>%s</h1>" % card_title,
+                   "<p>%s</p>" % body, '<p><a href="index.html">All cards</a></p>',
+                   "</body>", "</html>"]
+        else:
+            doc = ["# %s" % card_title, "", body, "",
+                   "[All cards](index.md)"]
+        (out / ("card-%d.%s" % (card["id"], ext))).write_text(
+            "\n".join(doc) + "\n", encoding="utf-8")
+    return out
+
+
+def build_parser():
+    parser = argparse.ArgumentParser(
+        prog="cardstack",
+        description="Create and browse stacks of text cards with wiki links.",
+        epilog="Global option --dir PATH may be given before or after the "
+               "subcommand. Default: ~/.local/share/cardstack/stacks",
+    )
+    parser.add_argument("--dir", metavar="PATH", help="directory holding <stack>.json files")
+    parser.add_argument("--version", action="version", version="cardstack " + VERSION)
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    sub.add_parser("stacks", help="list all stacks")
+    p = sub.add_parser("new", help="create an empty stack")
+    p.add_argument("stack")
+    p.add_argument("--title")
+    p = sub.add_parser("add", help="append a card and print its numeric id")
+    p.add_argument("stack")
+    p.add_argument("--title")
+    p.add_argument("--text")
+    p = sub.add_parser("list", help="list cards in a stack")
+    p.add_argument("stack")
+    p = sub.add_parser("show", help="display one card")
+    p.add_argument("stack")
+    p.add_argument("card", help="numeric id or title")
+    p = sub.add_parser("edit", help="change a card's title and/or text")
+    p.add_argument("stack")
+    p.add_argument("card")
+    p.add_argument("--title")
+    p.add_argument("--text")
+    p = sub.add_parser("link", help="link one card to another")
+    p.add_argument("stack")
+    p.add_argument("from_card", metavar="from")
+    p.add_argument("to_card", metavar="to")
+    p.add_argument("--label", default="")
+    p = sub.add_parser("links", help="show links from a card")
+    p.add_argument("stack")
+    p.add_argument("card")
+    p = sub.add_parser("find", help="search card titles and text")
+    p.add_argument("query")
+    p.add_argument("--stack", help="limit the search to one stack")
+    p = sub.add_parser("export", help="write HTML or Markdown files")
+    p.add_argument("stack")
+    p.add_argument("outdir")
+    p.add_argument("--format", choices=("html", "markdown"), default="html")
+    p = sub.add_parser("rm", help="remove a card (its id is never reused)")
+    p.add_argument("stack")
+    p.add_argument("card")
+    return parser
+
+
+def dispatch(opts, root):
+    cmd = opts.command
+    if cmd == "stacks":
+        root.mkdir(parents=True, exist_ok=True)
+        for path in sorted(root.glob("*.json")):
+            try:
+                stack = json.loads(path.read_text(encoding="utf-8"))
+                print("%s\t%s" % (path.stem, stack.get("title", "")))
+            except (OSError, ValueError):
+                print("%s\t(invalid stack)" % path.stem)
+        return
+
+    if cmd == "new":
+        path = stack_path(root, opts.stack)
+        if path.exists():
+            raise CardstackError("stack '%s' already exists" % opts.stack)
+        write_json(path, {
+            "name": opts.stack,
+            "title": opts.title or opts.stack,
+            "created": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+            "next_id": 1,
+            "cards": [],
+        })
+        print("Created stack '%s'" % opts.stack)
+        return
+
+    if cmd == "find":
+        names = [opts.stack] if opts.stack else sorted(
+            p.stem for p in root.glob("*.json")) if root.exists() else []
+        needle = opts.query.lower()
+        for name in names:
+            current = load_stack(root, name)
+            for card in sorted(current["cards"], key=lambda c: c["id"]):
+                if needle in (card["title"] + "\n" + card["text"]).lower():
+                    print("%s/%d\t%s\t%s" % (
+                        name, card["id"], card["title"], snippet(card)))
+        return
+
+    stack = load_stack(root, opts.stack)
+    if cmd == "add":
+        ident = stack["next_id"]
+        title = opts.title or ("Card %d" % ident)
+        stack["cards"].append({
+            "id": ident,
+            "title": title,
+            "text": opts.text or "",
+            "links": [],
+        })
+        stack["next_id"] = ident + 1
+        write_json(stack_path(root, opts.stack), stack)
+        print("Added card %d: %s" % (ident, title))
+    elif cmd == "list":
+        for card in sorted(stack["cards"], key=lambda c: c["id"]):
+            print("%d\t%s" % (card["id"], card["title"]))
+    elif cmd == "show":
+        card = find_card(stack, opts.card)
+        print("id: %d\ntitle: %s\ntext: %s" % (card["id"], card["title"], card["text"]))
+        for link in card["links"]:
+            target = next((c for c in stack["cards"] if c["id"] == link["to"]), None)
+            print("link: %d\t%s\t%s" % (
+                link["to"], link.get("label", ""),
+                target["title"] if target else "(missing card)"))
+    elif cmd == "edit":
+        card = find_card(stack, opts.card)
+        if opts.title is not None:
+            card["title"] = opts.title
+        if opts.text is not None:
+            card["text"] = opts.text
+        write_json(stack_path(root, opts.stack), stack)
+        print("Updated card %d" % card["id"])
+    elif cmd == "link":
+        source = find_card(stack, opts.from_card)
+        target = find_card(stack, opts.to_card)
+        source["links"] = [l for l in source["links"] if l["to"] != target["id"]]
+        source["links"].append({"to": target["id"], "label": opts.label})
+        write_json(stack_path(root, opts.stack), stack)
+        print("Linked %d -> %d" % (source["id"], target["id"]))
+    elif cmd == "links":
+        card = find_card(stack, opts.card)
+        for link in card["links"]:
+            target = next((c for c in stack["cards"] if c["id"] == link["to"]), None)
+            print("%d\t%s\t%s" % (
+                link["to"], link.get("label") or "(no label)",
+                target["title"] if target else "(missing card)"))
+    elif cmd == "export":
+        path = export_stack(stack, opts.outdir, opts.format)
+        print("Exported '%s' to %s (%s)" % (opts.stack, path, opts.format))
+    elif cmd == "rm":
+        card = find_card(stack, opts.card)
+        ident = card["id"]
+        stack["cards"] = [c for c in stack["cards"] if c["id"] != ident]
+        for other in stack["cards"]:
+            other["links"] = [l for l in other["links"] if l["to"] != ident]
+        write_json(stack_path(root, opts.stack), stack)
+        print("Removed card %d" % ident)
+
+
+def main(argv=None):
+    argv = list(sys.argv[1:] if argv is None else argv)
+    argv, directory = extract_dir(argv)
+    parser = build_parser()
+    opts = parser.parse_args(argv)
+    root = Path(directory).expanduser() if directory else DEFAULT_DIR
+    try:
+        dispatch(opts, root)
+    except (CardstackError, OSError, ValueError) as exc:
+        parser.exit(2, "cardstack: error: %s\n" % exc)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

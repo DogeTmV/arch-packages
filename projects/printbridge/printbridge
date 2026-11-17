@@ -1,0 +1,472 @@
+#!/usr/bin/env python3
+"""printbridge - a small authenticated local print bridge.
+
+An original reimplementation inspired by the discontinued Google Cloud Print.
+Jobs are spooled as JSON and handed to the local ``lp`` command; the server
+binds to loopback unless explicitly told otherwise.
+"""
+
+import argparse
+import datetime as dt
+import functools
+import hmac
+import http.server
+import json
+import os
+import re
+import secrets
+import subprocess
+import sys
+import tempfile
+import urllib.error
+import urllib.parse
+import urllib.request
+import uuid
+
+VERSION = "0.1.0"
+DEFAULT_HOST = "127.0.0.1"
+DEFAULT_PORT = 8123
+MAX_BYTES = 5 * 1024 * 1024
+DEFAULT_SPOOL = os.path.expanduser("~/.local/share/printbridge/spool")
+DEFAULT_CONFIG = os.path.expanduser("~/.local/share/printbridge/config.json")
+CONTENT_KINDS = {
+    "application/pdf": ("pdf", b"%PDF-"),
+    "image/png": ("png", b"\x89PNG\r\n\x1a\n"),
+    "text/plain": ("text", None),
+}
+FILE_TYPES = {
+    ".pdf": "application/pdf",
+    ".png": "image/png",
+    ".txt": "text/plain",
+    ".text": "text/plain",
+}
+EXTENSIONS = {"pdf": ".pdf", "png": ".png", "text": ".txt"}
+
+
+# ---------------------------------------------------------------------------
+# Configuration and JSON spool
+# ---------------------------------------------------------------------------
+
+def config_path():
+    return os.environ.get("PRINTBRIDGE_CONFIG") or DEFAULT_CONFIG
+
+
+def spool_path(args=None):
+    chosen = getattr(args, "spool", None) or os.environ.get("PRINTBRIDGE_SPOOL")
+    return chosen or DEFAULT_SPOOL
+
+
+def load_config():
+    path = config_path()
+    try:
+        with open(path, encoding="utf-8") as handle:
+            data = json.load(handle)
+        return data if isinstance(data, dict) else {}
+    except FileNotFoundError:
+        return {}
+    except (OSError, ValueError) as exc:
+        raise RuntimeError("cannot read config %s: %s" % (path, exc)) from exc
+
+
+def write_json(path, data):
+    parent = os.path.dirname(os.path.abspath(path))
+    os.makedirs(parent, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=parent, prefix=".printbridge-")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(data, handle, indent=2, sort_keys=True)
+            handle.write("\n")
+        os.replace(tmp, path)
+    except BaseException:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+        raise
+
+
+def save_config(config):
+    write_json(config_path(), config)
+
+
+def spool_dirs(spool):
+    jobs = os.path.join(spool, "jobs")
+    data = os.path.join(spool, "data")
+    os.makedirs(jobs, exist_ok=True)
+    os.makedirs(data, exist_ok=True)
+    return jobs, data
+
+
+def job_path(spool, job_id):
+    if not re.fullmatch(r"[0-9A-Za-z_-]+", job_id or ""):
+        return None
+    return os.path.join(spool, "jobs", job_id + ".json")
+
+
+def load_job(path):
+    try:
+        with open(path, encoding="utf-8") as handle:
+            job = json.load(handle)
+    except (OSError, ValueError) as exc:
+        raise RuntimeError("cannot read job %s: %s" % (path, exc)) from exc
+    if not isinstance(job, dict) or "id" not in job:
+        raise RuntimeError("unrecognised job file: %s" % path)
+    return job
+
+
+def save_job(spool, job):
+    write_json(os.path.join(spool, "jobs", job["id"] + ".json"), job)
+
+
+def list_jobs(spool):
+    directory = os.path.join(spool, "jobs")
+    if not os.path.isdir(directory):
+        return []
+    jobs = []
+    for name in sorted(os.listdir(directory)):
+        if name.endswith(".json"):
+            jobs.append(load_job(os.path.join(directory, name)))
+    return jobs
+
+
+def now_iso():
+    return dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds").replace(
+        "+00:00", "Z")
+
+
+def create_job(spool, printer, kind, payload, filename, dry_run):
+    jobs_dir, data_dir = spool_dirs(spool)
+    stamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%d%H%M%S")
+    job_id = "%s-%s" % (stamp, uuid.uuid4().hex[:8])
+    default_name = "document" + EXTENSIONS[kind]
+    safe_name = os.path.basename(filename or default_name)
+    safe_name = re.sub(r"[^A-Za-z0-9._-]", "_", safe_name) or default_name
+    data_path = os.path.join(data_dir, job_id + "-" + safe_name)
+    with open(data_path, "wb") as handle:
+        handle.write(payload)
+    job = {
+        "id": job_id,
+        "created": now_iso(),
+        "filename": safe_name,
+        "kind": kind,
+        "size": len(payload),
+        "printer": printer,
+        "status": "queued",
+        "dry_run": bool(dry_run),
+        "data_path": data_path,
+        "command": ["lp", "-d", printer, data_path],
+    }
+    write_json(os.path.join(jobs_dir, job_id + ".json"), job)
+    return job
+
+
+def handoff(spool, job):
+    """Invoke lp unless this job belongs to a dry-run server."""
+    if job.get("dry_run"):
+        return job
+    try:
+        result = subprocess.run(
+            job["command"], capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError) as exc:
+        job["status"] = "failed"
+        job["error"] = str(exc)
+    else:
+        job["status"] = "sent" if result.returncode == 0 else "failed"
+        if result.returncode != 0:
+            job["error"] = (result.stderr or result.stdout).strip()[:500]
+    job["completed"] = now_iso()
+    save_job(spool, job)
+    return job
+
+
+# ---------------------------------------------------------------------------
+# HTTP server
+# ---------------------------------------------------------------------------
+
+class PrintHandler(http.server.BaseHTTPRequestHandler):
+    server_version = "printbridge/" + VERSION
+
+    def __init__(self, *args, token="", printer="default", spool=None,
+                 dry_run=False, **kwargs):
+        self.token = token
+        self.printer = printer
+        self.spool = spool or spool_path()
+        self.dry_run = dry_run
+        super().__init__(*args, **kwargs)
+
+    def log_message(self, fmt, *args):
+        pass  # quiet by default; job state is the record
+
+    def respond(self, code, payload):
+        body = json.dumps(payload).encode("utf-8")
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def authorized(self):
+        supplied = self.headers.get("X-Auth-Token", "")
+        bearer = self.headers.get("Authorization", "")
+        if bearer.lower().startswith("bearer "):
+            supplied = bearer[7:].strip()
+        return bool(supplied) and hmac.compare_digest(supplied, self.token)
+
+    def do_GET(self):
+        path = urllib.parse.urlsplit(self.path).path
+        if path == "/health":
+            self.respond(200, {"ok": True, "service": "printbridge"})
+        elif path == "/print":
+            self.respond(405, {"error": "use POST for /print"})
+        else:
+            self.respond(404, {"error": "not found"})
+
+    def do_POST(self):
+        if urllib.parse.urlsplit(self.path).path != "/print":
+            self.respond(404, {"error": "not found"})
+            return
+        if not self.authorized():
+            self.respond(401, {"error": "invalid or missing token"})
+            return
+        try:
+            content_type = self.headers.get_content_type()
+        except (AttributeError, ValueError):
+            content_type = ""
+        if content_type not in CONTENT_KINDS:
+            self.respond(415, {"error": "unsupported media type"})
+            return
+        length_header = self.headers.get("Content-Length")
+        if length_header is None:
+            self.respond(411, {"error": "Content-Length required"})
+            return
+        try:
+            length = int(length_header)
+        except ValueError:
+            self.respond(400, {"error": "invalid Content-Length"})
+            return
+        if length < 0 or length > MAX_BYTES:
+            self.respond(413, {"error": "payload too large"})
+            return
+        payload = self.rfile.read(length)
+        kind, magic = CONTENT_KINDS[content_type]
+        if magic and not payload.startswith(magic):
+            self.respond(415, {"error": "payload does not match content type"})
+            return
+        if kind == "text":
+            try:
+                payload.decode("utf-8")
+            except UnicodeDecodeError:
+                self.respond(415, {"error": "plaintext must be UTF-8"})
+                return
+        filename = self.headers.get("X-Print-Filename", "")
+        job = create_job(self.spool, self.printer, kind, payload, filename,
+                         self.dry_run)
+        if not self.dry_run:
+            handoff(self.spool, job)
+        self.respond(202, {
+            "id": job["id"], "status": job["status"],
+            "printer": job["printer"], "dry_run": job["dry_run"],
+        })
+
+
+def create_server(host=DEFAULT_HOST, port=DEFAULT_PORT, token=None,
+                  printer=None, spool=None, dry_run=False):
+    """Build an unstarted threaded HTTP server; port=0 picks a free port."""
+    config = load_config()
+    token = token or config.get("token")
+    if not token:
+        token = secrets.token_urlsafe(24)
+        print("printbridge: generated token: %s" % token, file=sys.stderr)
+    printer = printer or config.get("printer") or "default"
+    spool = spool or config.get("spool") or spool_path()
+    handler = functools.partial(
+        PrintHandler, token=token, printer=printer, spool=spool,
+        dry_run=dry_run)
+    return http.server.ThreadingHTTPServer((host, port), handler)
+
+
+# ---------------------------------------------------------------------------
+# Commands
+# ---------------------------------------------------------------------------
+
+def cmd_serve(args):
+    if not 0 <= args.port <= 65535:
+        raise RuntimeError("port must be between 0 and 65535")
+    server = create_server(
+        host=args.host, port=args.port, token=args.token,
+        printer=args.printer, spool=args.spool, dry_run=args.dry_run)
+    host, port = server.server_address[:2]
+    suffix = " (dry-run: lp is never invoked)" if args.dry_run else ""
+    print("printbridge listening on http://%s:%d, printer=%s, spool=%s%s" % (
+        host, port, args.printer or "default", spool_path(args), suffix),
+        flush=True)
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.server_close()
+    print("printbridge stopped")
+    return 0
+
+
+def cmd_queue(args):
+    jobs = list_jobs(spool_path(args))
+    if not jobs:
+        print("No jobs.")
+        return 0
+    print("%-24s %-10s %-12s %-6s %8s  %s" % (
+        "ID", "STATUS", "PRINTER", "KIND", "BYTES", "FILENAME"))
+    for job in jobs:
+        print("%-24s %-10s %-12s %-6s %8d  %s" % (
+            job["id"], job.get("status", "queued"), job.get("printer", ""),
+            job.get("kind", ""), job.get("size", 0), job.get("filename", "")))
+    return 0
+
+
+def cmd_status(args):
+    jobs = list_jobs(spool_path(args))
+    counts = {name: 0 for name in ("queued", "sent", "failed", "cancelled")}
+    for job in jobs:
+        status = job.get("status", "queued")
+        counts[status] = counts.get(status, 0) + 1
+    print("spool: %s" % spool_path(args))
+    print("Jobs: %d" % len(jobs))
+    for name in ("queued", "sent", "failed", "cancelled"):
+        print("%s: %d" % (name, counts[name]))
+    return 0
+
+
+def cmd_cancel(args):
+    path = job_path(spool_path(args), args.job_id)
+    if not path or not os.path.isfile(path):
+        print("printbridge: no such job: %s" % args.job_id, file=sys.stderr)
+        return 1
+    job = load_job(path)
+    if job.get("status", "queued") != "queued":
+        print("printbridge: cannot cancel %s (status: %s)" % (
+            args.job_id, job.get("status")), file=sys.stderr)
+        return 1
+    job["status"] = "cancelled"
+    job["cancelled"] = now_iso()
+    save_job(spool_path(args), job)
+    data = job.get("data_path")
+    if data and os.path.isfile(data):
+        os.unlink(data)
+    print("Cancelled %s" % args.job_id)
+    return 0
+
+
+def cmd_config(args):
+    config = load_config()
+    if args.token is not None:
+        config["token"] = args.token
+    if args.printer is not None:
+        config["printer"] = args.printer
+    if args.token is not None or args.printer is not None:
+        save_config(config)
+    print("config: %s" % config_path())
+    print("printer: %s" % config.get("printer", "(default)"))
+    print("token: %s" % ("set" if config.get("token") else "(not set)"))
+    return 0
+
+
+def cmd_send(args):
+    parsed = urllib.parse.urlsplit(args.url)
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        print("printbridge: URL must be http(s)://host[:port]/print",
+              file=sys.stderr)
+        return 1
+    content_type = FILE_TYPES.get(os.path.splitext(args.file)[1].lower())
+    if not content_type:
+        print("printbridge: unsupported file type (use .pdf, .png or .txt)",
+              file=sys.stderr)
+        return 1
+    try:
+        with open(args.file, "rb") as handle:
+            payload = handle.read()
+    except OSError as exc:
+        print("printbridge: cannot read %s: %s" % (args.file, exc),
+              file=sys.stderr)
+        return 1
+    if len(payload) > MAX_BYTES:
+        print("printbridge: file exceeds the %d byte limit" % MAX_BYTES,
+              file=sys.stderr)
+        return 1
+    request = urllib.request.Request(args.url, data=payload, method="POST", headers={
+        "Content-Type": content_type,
+        "X-Auth-Token": args.token,
+        "X-Print-Filename": os.path.basename(args.file),
+    })
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            code, body = response.status, response.read().decode("utf-8", "replace")
+    except urllib.error.HTTPError as exc:
+        code, body = exc.code, exc.read().decode("utf-8", "replace")
+    except (urllib.error.URLError, OSError) as exc:
+        print("printbridge: cannot reach %s: %s" % (args.url, exc),
+              file=sys.stderr)
+        return 1
+    if not 200 <= code < 300:
+        print("printbridge: server returned %d: %s" % (code, body.strip()),
+              file=sys.stderr)
+        return 1
+    try:
+        reply = json.loads(body)
+        print("Queued %s for printer %s" % (
+            reply.get("id", "?"), reply.get("printer", "?")))
+    except ValueError:
+        print(body.strip())
+    return 0
+
+
+COMMANDS = {
+    "serve": cmd_serve, "queue": cmd_queue, "status": cmd_status,
+    "cancel": cmd_cancel, "config": cmd_config, "send": cmd_send,
+}
+
+
+def build_parser():
+    parser = argparse.ArgumentParser(
+        prog="printbridge", description="Small authenticated local print bridge")
+    parser.add_argument("--version", action="version",
+                        version="printbridge " + VERSION)
+    subs = parser.add_subparsers(dest="command", required=True)
+    spool_arg = argparse.ArgumentParser(add_help=False)
+    spool_arg.add_argument("--spool", metavar="DIR", help="spool directory")
+
+    serve = subs.add_parser("serve", help="run the local HTTP print server")
+    serve.add_argument("--host", default=DEFAULT_HOST, metavar="ADDR")
+    serve.add_argument("--port", type=int, default=DEFAULT_PORT, metavar="PORT")
+    serve.add_argument("--token", metavar="TOKEN")
+    serve.add_argument("--printer", metavar="NAME")
+    serve.add_argument("--spool", metavar="DIR")
+    serve.add_argument("--dry-run", action="store_true",
+                       help="record lp command instead of printing")
+
+    subs.add_parser("queue", parents=[spool_arg], help="list spooled jobs")
+    subs.add_parser("status", parents=[spool_arg], help="summarise the spool")
+    cancel = subs.add_parser("cancel", parents=[spool_arg],
+                             help="cancel a queued job")
+    cancel.add_argument("job_id", metavar="job-id")
+
+    config = subs.add_parser("config", help="show or set local defaults")
+    config.add_argument("--token", metavar="TOKEN")
+    config.add_argument("--printer", metavar="NAME")
+
+    send = subs.add_parser("send", help="submit a local file to a bridge")
+    send.add_argument("file", metavar="file")
+    send.add_argument("--url", required=True, metavar="URL")
+    send.add_argument("--token", required=True, metavar="TOKEN")
+    return parser
+
+
+def main(argv=None):
+    args = build_parser().parse_args(argv)
+    try:
+        return COMMANDS[args.command](args)
+    except (RuntimeError, OSError, ValueError) as exc:
+        print("printbridge: %s" % exc, file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

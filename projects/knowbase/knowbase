@@ -1,0 +1,280 @@
+#!/usr/bin/env python3
+"""knowbase - a small offline encyclopedia stored as plain JSON articles."""
+
+import argparse
+import html
+import json
+import random
+import re
+import sys
+from pathlib import Path
+
+VERSION = "0.1.0"
+
+
+class KnowbaseError(Exception):
+    """A user-facing error with no traceback."""
+
+
+def build_parser():
+    parser = argparse.ArgumentParser(
+        prog="knowbase", description="Create and browse an offline encyclopedia of JSON articles."
+    )
+    parser.add_argument("--version", action="version", version=f"knowbase {VERSION}")
+    subs = parser.add_subparsers(dest="command", required=True)
+
+    init = subs.add_parser("init", help="create a new encyclopedia directory")
+    init.add_argument("dir")
+    init.add_argument("--sample", action="store_true", help="install bundled sample articles")
+
+    add = subs.add_parser("add", help="add an article")
+    add.add_argument("dir")
+    add.add_argument("title")
+    add.add_argument("--body", metavar="FILE|-", help="body text file, or - for stdin")
+    add.add_argument("--tags", default="", metavar="a,b")
+    add.add_argument("--see", action="append", default=[], metavar="TITLE")
+
+    rm = subs.add_parser("rm", help="remove an article")
+    rm.add_argument("dir")
+    rm.add_argument("title")
+
+    listing = subs.add_parser("list", help="list article titles")
+    listing.add_argument("dir")
+    listing.add_argument("--tag", metavar="TAG")
+
+    show = subs.add_parser("show", help="show one article")
+    show.add_argument("dir")
+    show.add_argument("title")
+
+    search = subs.add_parser("search", help="search titles, bodies and tags")
+    search.add_argument("dir")
+    search.add_argument("query")
+
+    subs.add_parser("random", help="show a random article").add_argument("dir")
+
+    export = subs.add_parser("export", help="export articles to files")
+    export.add_argument("dir")
+    export.add_argument("outdir")
+    export.add_argument("--format", choices=("html", "markdown"), default="html")
+
+    stats = subs.add_parser("stats", help="show collection statistics")
+    stats.add_argument("dir")
+    return parser
+
+
+def articles_dir(directory):
+    path = Path(directory) / "articles"
+    if not path.is_dir():
+        raise KnowbaseError(f"{directory!r} is not an initialized knowbase (missing articles/); run 'knowbase init'")
+    return path
+
+
+def slug(title):
+    result = re.sub(r"[^\w]+", "-", title.strip().lower(), flags=re.UNICODE).strip("-")
+    return result or "article"
+
+
+def load_all(directory):
+    folder = articles_dir(directory)
+    articles = []
+    for path in sorted(folder.glob("*.json")):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            raise KnowbaseError(f"cannot read article {path}: {exc}") from None
+        if not isinstance(data, dict) or "title" not in data:
+            raise KnowbaseError(f"article {path} is missing a title")
+        articles.append(data)
+    return sorted(articles, key=lambda item: item["title"].casefold())
+
+
+def find_article(directory, title):
+    wanted = title.strip().casefold()
+    for article in load_all(directory):
+        if article["title"].strip().casefold() == wanted or slug(article["title"]) == slug(title):
+            return article
+    raise KnowbaseError(f"article not found: {title!r}")
+
+
+def sample_path():
+    local = Path(__file__).resolve().parent / "share" / "sample-articles.json"
+    if local.is_file():
+        return local
+    return Path("/usr/share/knowbase/sample-articles.json")
+
+
+def cmd_init(args):
+    directory = Path(args.dir)
+    folder = directory / "articles"
+    try:
+        folder.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise KnowbaseError(f"cannot create {folder}: {exc}") from None
+    if args.sample:
+        path = sample_path()
+        try:
+            articles = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            raise KnowbaseError(f"cannot load sample articles from {path}: {exc}") from None
+        for article in articles:
+            target = folder / (slug(article["title"]) + ".json")
+            if not target.exists():
+                target.write_text(json.dumps(article, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    print(f"Initialized knowbase at {directory} ({len(list(folder.glob('*.json')))} articles)")
+
+
+def read_body(spec):
+    if spec is None:
+        return ""
+    if spec == "-":
+        return sys.stdin.read()
+    try:
+        return Path(spec).read_text(encoding="utf-8")
+    except OSError as exc:
+        raise KnowbaseError(f"cannot read body file {spec!r}: {exc}") from None
+
+
+def cmd_add(args):
+    folder = articles_dir(args.dir)
+    title = args.title.strip()
+    if not title:
+        raise KnowbaseError("article title must not be empty")
+    target = folder / (slug(title) + ".json")
+    if target.exists():
+        raise KnowbaseError(f"article already exists: {title!r}")
+    article = {
+        "title": title,
+        "body": read_body(args.body),
+        "tags": [tag.strip() for tag in args.tags.split(",") if tag.strip()],
+        "see_also": [item.strip() for item in args.see if item.strip()],
+    }
+    try:
+        target.write_text(json.dumps(article, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    except OSError as exc:
+        raise KnowbaseError(f"cannot write article {target}: {exc}") from None
+    print(f"Added: {title}")
+
+
+def format_article(article):
+    lines = [
+        f"Title: {article['title']}",
+        "Tags: " + (", ".join(article.get("tags", [])) or "(none)"),
+        "",
+        article.get("body", ""),
+    ]
+    if article.get("see_also"):
+        lines += ["", "See also: " + ", ".join(article["see_also"])]
+    return "\n".join(lines)
+
+
+def cmd_show(args):
+    print(format_article(find_article(args.dir, args.title)))
+
+
+def cmd_rm(args):
+    folder = articles_dir(args.dir)
+    article = find_article(args.dir, args.title)
+    target = folder / (slug(article["title"]) + ".json")
+    try:
+        target.unlink()
+    except OSError as exc:
+        raise KnowbaseError(f"cannot remove article {target}: {exc}") from None
+    print(f"Removed: {article['title']}")
+
+
+def cmd_list(args):
+    articles = load_all(args.dir)
+    wanted = args.tag.strip().casefold() if args.tag else None
+    for article in articles:
+        tags = [str(tag).casefold() for tag in article.get("tags", [])]
+        if wanted is None or wanted in tags:
+            print(article["title"])
+
+
+def cmd_search(args):
+    terms = args.query.casefold().split()
+    if not terms:
+        raise KnowbaseError("search query must not be empty")
+    for article in load_all(args.dir):
+        haystack = " ".join(
+            [article["title"], article.get("body", "")]
+            + list(article.get("tags", [])) + list(article.get("see_also", []))
+        ).casefold()
+        if all(term in haystack for term in terms):
+            print(article["title"])
+
+
+def cmd_random(args):
+    articles = load_all(args.dir)
+    print(format_article(random.choice(articles)))
+
+
+def cmd_export(args):
+    if args.format not in ("html", "markdown"):
+        raise KnowbaseError(f"unknown export format {args.format!r}; use html or markdown")
+    outdir = Path(args.outdir)
+    try:
+        outdir.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise KnowbaseError(f"cannot create export directory {outdir}: {exc}") from None
+    articles = load_all(args.dir)
+    for article in articles:
+        title = article["title"]
+        body = article.get("body", "")
+        tags = ", ".join(article.get("tags", []))
+        see = ", ".join(article.get("see_also", []))
+        if args.format == "html":
+            content = (
+                "<!DOCTYPE html>\n<html lang=\"en\"><head><meta charset=\"utf-8\"><title>"
+                + html.escape(title) + "</title></head><body><h1>" + html.escape(title)
+                + "</h1><p>" + html.escape(body).replace("\n", "<br>") + "</p>"
+            )
+            if tags:
+                content += "<p>Tags: " + html.escape(tags) + "</p>"
+            if see:
+                content += "<p>See also: " + html.escape(see) + "</p>"
+            content += "</body></html>\n"
+            suffix = ".html"
+        else:
+            content = f"# {title}\n\n{body}\n"
+            if tags:
+                content += f"\nTags: {tags}\n"
+            if see:
+                content += f"\nSee also: {see}\n"
+            suffix = ".md"
+        target = outdir / (slug(title) + suffix)
+        try:
+            target.write_text(content, encoding="utf-8")
+        except OSError as exc:
+            raise KnowbaseError(f"cannot write export file {target}: {exc}") from None
+    print(f"Exported {len(articles)} articles to {outdir} ({args.format})")
+
+
+def cmd_stats(args):
+    articles = load_all(args.dir)
+    tags = {str(tag).casefold() for article in articles for tag in article.get("tags", [])}
+    links = sum(len(article.get("see_also", [])) for article in articles)
+    print(f"articles: {len(articles)}")
+    print(f"tags: {len(tags)}")
+    print(f"see-also links: {links}")
+
+
+COMMANDS = {
+    "init": cmd_init, "add": cmd_add, "rm": cmd_rm, "list": cmd_list,
+    "show": cmd_show, "search": cmd_search, "random": cmd_random,
+    "export": cmd_export, "stats": cmd_stats,
+}
+
+
+def main(argv=None):
+    args = build_parser().parse_args(argv)
+    try:
+        COMMANDS[args.command](args)
+    except KnowbaseError as exc:
+        print(f"knowbase: error: {exc}", file=sys.stderr)
+        return 2
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

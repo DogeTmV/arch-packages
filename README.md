@@ -10,12 +10,48 @@ Users add one `[dogetmv]` block once, then install any package with
 
 ## Bundled source projects
 
-Source trees kept alongside the package definitions live in `projects/`:
+Source trees kept alongside the package definitions live in `projects/`. The
+`DISCONTINUED-SOFTWARE.md` research document lists the retired programs that
+inspired the new tools; every successor is original code with no upstream
+assets.
 
 - [`projects/terminal-autocorrect`](projects/terminal-autocorrect/README.md) —
   conservative fish command typo correction with a recent-command cache,
   whole-system command discovery, usage-ranked suggestions, and a fish-native
   installer (`source install.fish`) that activates automatically.
+
+Feed and data tools:
+
+- [`projects/rssledger`](projects/rssledger/README.md) — local RSS/Atom reader with OPML import/export.
+- [`projects/pipeway`](projects/pipeway/README.md) — composable feed/data pipelines with JSON configs.
+- [`projects/desksearch`](projects/desksearch/README.md) — local full-text index with snippets and ranking.
+- [`projects/chartlet`](projects/chartlet/README.md) — CSV-to-SVG bar, line, pie, and sparkline charts.
+- [`projects/photoatlas`](projects/photoatlas/README.md) — photo index, duplicate finder, tags, and static galleries.
+
+Communication and archive tools:
+
+- [`projects/chathoard`](projects/chathoard/README.md) — unified chat-log archive, search, and export.
+- [`projects/bookmarkdeck`](projects/bookmarkdeck/README.md) — bookmark manager with Netscape HTML import/export.
+- [`projects/notebox`](projects/notebox/README.md) — tagged local notebook with Markdown/HTML export.
+- [`projects/threadweave`](projects/threadweave/README.md) — mbox importer and threaded conversation browser.
+- [`projects/knowbase`](projects/knowbase/README.md) — offline article encyclopedia with original sample content.
+
+Retro desktop tools:
+
+- [`projects/minamp`](projects/minamp/README.md) — playlist manager and playback front-end with M3U support.
+- [`projects/cardstack`](projects/cardstack/README.md) — linked text card stacks with wiki links.
+- [`projects/memopad`](projects/memopad/README.md) — memo database with categories and CSV/JSON round-trips.
+- [`projects/snakecell`](projects/snakecell/README.md) — deterministic terminal Snake game.
+- [`projects/starsaver`](projects/starsaver/README.md) — starfield, digital-rain, and pipes terminal screensavers.
+- [`projects/homestead`](projects/homestead/README.md) — themed static personal-site generator.
+
+Local services and planning:
+
+- [`projects/contextcards`](projects/contextcards/README.md) — date-driven local context digest.
+- [`projects/tripplan`](projects/tripplan/README.md) — offline itineraries with ICS export.
+- [`projects/printbridge`](projects/printbridge/README.md) — authenticated loopback HTTP-to-`lp` print bridge.
+
+Run the whole bundled suite with `./ci/test-projects.sh --build`.
 
 A pacman repo is just a directory plus a `<name>.db` file; nothing ties it to a
 single source project. The repo name is effectively permanent because pacman
@@ -69,45 +105,73 @@ Both should return `HTTP/2 200`.
 
 ## Adding another project
 
-1. Create `packages/<name>/PKGBUILD` in this repo. For a project with release
-   tags, use the tag archive as the source:
+Projects whose source lives in this repo are the simplest case. Put the source
+tree in `projects/<name>/` and use this `packages/<name>/PKGBUILD`:
 
-   ```bash
-   # Maintainer: DogeTmV
-   pkgname=my-app
-   pkgver=2.1.0
-   pkgrel=1
-   pkgdesc='Short description'
-   arch=('x86_64')
-   url='https://github.com/DogeTmV/my-app'
-   license=('MIT')
-   depends=('python')
-   makedepends=('python-build' 'python-installer' 'python-setuptools' 'python-wheel')
-   source=("$pkgname-$pkgver.tar.gz::https://github.com/DogeTmV/my-app/archive/refs/tags/v$pkgver.tar.gz")
-   sha256sums=('SKIP')
+```bash
+# Maintainer: DogeTmV
+pkgname=my-app
+pkgver=0.1.0
+pkgrel=1
+pkgdesc='Short description'
+arch=('any')
+url='https://github.com/DogeTmV/arch-packages'
+license=('MIT')
+depends=('python')
+source=("local-source.tar.gz")
+sha256sums=('SKIP')
 
-   build() {
-     cd "$pkgname-$pkgver"
-     python -m build --wheel --no-isolation
-   }
+package() {
+  cd "$pkgname"
+  install -Dm755 "$pkgname" "$pkgdir/usr/bin/$pkgname"
+  install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}
+```
 
-   package() {
-     cd "$pkgname-$pkgver"
-     python -m installer --destdir="$pkgdir" dist/*.whl
-   }
-   ```
+The workflow tars `projects/<name>` into `local-source.tar.gz` next to the
+PKGBUILD before invoking `makepkg`, and a push that touches either `projects/`
+or `packages/` triggers a rebuild. You can test the same flow locally with
+`./ci/build-local.sh <name>`.
 
-   Replace the `build()`/`package()` bodies if the project is not a Python
-   package. Use a real SHA-256 instead of `SKIP` when you want reproducible
-   builds: `curl -L <source-url> | sha256sum`.
+For a project with its own release tags, use the tag archive as the source:
 
-2. Push to `main`:
+```bash
+# Maintainer: DogeTmV
+pkgname=my-app
+pkgver=2.1.0
+pkgrel=1
+pkgdesc='Short description'
+arch=('x86_64')
+url='https://github.com/DogeTmV/my-app'
+license=('MIT')
+depends=('python')
+makedepends=('python-build' 'python-installer' 'python-setuptools' 'python-wheel')
+source=("$pkgname-$pkgver.tar.gz::https://github.com/DogeTmV/my-app/archive/refs/tags/v$pkgver.tar.gz")
+sha256sums=('SKIP')
 
-   ```bash
-   git add packages/my-app/PKGBUILD
-   git commit -m "Add my-app"
-   git push
-   ```
+build() {
+  cd "$pkgname-$pkgver"
+  python -m build --wheel --no-isolation
+}
+
+package() {
+  cd "$pkgname-$pkgver"
+  python -m installer --destdir="$pkgdir" dist/*.whl
+}
+```
+
+Replace the `build()`/`package()` bodies if the project is not a Python
+package. Use a real SHA-256 instead of `SKIP` when you want reproducible
+builds: `curl -L <source-url> | sha256sum`.
+
+Finally, push to `main`:
+
+```bash
+git add packages/my-app/PKGBUILD projects/my-app
+git commit -m "Add my-app"
+git push
+```
 
 The workflow detects which `packages/*` directories changed, builds only
 those in an Arch container, copies the resulting `.pkg.tar.zst` into the

@@ -1,0 +1,323 @@
+#!/usr/bin/env python3
+"""bookmarkdeck - a local, offline bookmark manager with Netscape HTML I/O."""
+
+import argparse
+import hashlib
+import html
+import json
+import os
+import subprocess
+import sys
+import time
+from html.parser import HTMLParser
+
+VERSION = "0.1.0"
+APP = "bookmarkdeck"
+DEFAULT_DB = os.path.join(os.path.expanduser("~"), ".local", "share", APP, "bookmarks.json")
+
+
+def die(message):
+    print("{}: {}".format(APP, message), file=sys.stderr)
+    raise SystemExit(1)
+
+
+def load_store(db_path):
+    if not os.path.exists(db_path):
+        return {"version": 1, "bookmarks": []}
+    try:
+        with open(db_path, encoding="utf-8") as handle:
+            store = json.load(handle)
+    except (OSError, ValueError) as exc:
+        die("cannot read store {}: {}".format(db_path, exc))
+    if not isinstance(store, dict) or not isinstance(store.get("bookmarks"), list):
+        die("store {} is not a valid bookmarkdeck store".format(db_path))
+    return store
+
+
+def save_store(db_path, store):
+    try:
+        os.makedirs(os.path.dirname(os.path.abspath(db_path)), exist_ok=True)
+        with open(db_path, "w", encoding="utf-8") as handle:
+            json.dump(store, handle, indent=2, sort_keys=True, ensure_ascii=False)
+            handle.write("\n")
+    except OSError as exc:
+        die("cannot write store {}: {}".format(db_path, exc))
+
+
+def bookmark_id(url):
+    return "b-" + hashlib.sha256(url.encode("utf-8")).hexdigest()[:12]
+
+
+class NetscapeBookmarkParser(HTMLParser):
+    """Read folder names and <A HREF> entries from a Netscape bookmark file."""
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.items = []
+        self.folders = []
+        self.dl_stack = []
+        self.pending_folder = None
+        self.in_h3 = False
+        self.h3_parts = []
+        self.current = None
+
+    def handle_starttag(self, tag, attrs):
+        attrs = dict(attrs)
+        if tag == "dl":
+            has_folder = self.pending_folder is not None
+            if has_folder:
+                self.folders.append(self.pending_folder)
+                self.pending_folder = None
+            self.dl_stack.append(has_folder)
+        elif tag == "h3":
+            self.in_h3 = True
+            self.h3_parts = []
+        elif tag == "a":
+            self.current = {
+                "url": attrs.get("href", ""),
+                "title_parts": [],
+                "add_date": attrs.get("add_date", ""),
+                "tags": attrs.get("tags", ""),
+                "folders": list(self.folders),
+            }
+
+    def handle_data(self, data):
+        if self.in_h3:
+            self.h3_parts.append(data)
+        elif self.current is not None:
+            self.current["title_parts"].append(data)
+
+    def handle_endtag(self, tag):
+        if tag == "h3" and self.in_h3:
+            self.pending_folder = "".join(self.h3_parts).strip() or "Untitled"
+            self.in_h3 = False
+        elif tag == "a" and self.current is not None:
+            item = self.current
+            self.current = None
+            title = "".join(item["title_parts"]).strip() or item["url"]
+            tags = set(item["folders"])
+            tags.update(t.strip() for t in item["tags"].split(",") if t.strip())
+            added = int(item["add_date"]) if item["add_date"].isdigit() else int(time.time())
+            self.items.append({
+                "id": bookmark_id(item["url"]),
+                "url": item["url"],
+                "title": title,
+                "tags": sorted(tags),
+                "added": added,
+            })
+        elif tag == "dl" and self.dl_stack:
+            if self.dl_stack.pop() and self.folders:
+                self.folders.pop()
+
+
+def merge_bookmarks(store, items):
+    by_id = {b["id"]: b for b in store["bookmarks"]}
+    for item in items:
+        if not item["url"]:
+            continue
+        existing = by_id.get(item["id"])
+        if existing:
+            existing["tags"] = sorted(set(existing["tags"]) | set(item["tags"]))
+            if item["title"] != item["url"]:
+                existing["title"] = item["title"]
+        else:
+            by_id[item["id"]] = item
+    store["bookmarks"] = [by_id[key] for key in sorted(by_id)]
+
+
+def find_bookmark(store, bookmark_id_value):
+    for bookmark in store["bookmarks"]:
+        if bookmark["id"] == bookmark_id_value:
+            return bookmark
+    die("no bookmark with id {}".format(bookmark_id_value))
+
+
+def render_line(bookmark):
+    return "{}\t{}\t{}\t[{}]".format(
+        bookmark["id"], bookmark["title"], bookmark["url"],
+        ",".join(bookmark["tags"]))
+
+
+def cmd_import(args):
+    if not os.path.isfile(args.file):
+        die("file not found: {}".format(args.file))
+    parser = NetscapeBookmarkParser()
+    try:
+        with open(args.file, encoding="utf-8", errors="replace") as handle:
+            parser.feed(handle.read())
+    except OSError as exc:
+        die("cannot read {}: {}".format(args.file, exc))
+    store = load_store(args.db)
+    merge_bookmarks(store, parser.items)
+    save_store(args.db, store)
+    print("imported {} bookmark(s) from {}".format(len(parser.items), args.file))
+
+
+def cmd_export(args):
+    store = load_store(args.db)
+    lines = [
+        "<!DOCTYPE NETSCAPE-Bookmark-file-1>",
+        '<META HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=UTF-8">',
+        "<TITLE>Bookmarks</TITLE>",
+        "<H1>Bookmarks</H1>",
+        "<DL><p>",
+    ]
+    for bookmark in store["bookmarks"]:
+        lines.append('    <DT><A HREF="{}" ADD_DATE="{}" TAGS="{}">{}</A>'.format(
+            html.escape(bookmark["url"], quote=True),
+            bookmark["added"],
+            html.escape(",".join(bookmark["tags"]), quote=True),
+            html.escape(bookmark["title"])))
+    lines.extend(["</DL><p>", ""])
+    try:
+        with open(args.file, "w", encoding="utf-8") as handle:
+            handle.write("\n".join(lines))
+    except OSError as exc:
+        die("cannot write {}: {}".format(args.file, exc))
+    print("exported {} bookmark(s) to {}".format(len(store["bookmarks"]), args.file))
+
+
+def cmd_add(args):
+    store = load_store(args.db)
+    tags = sorted({t.strip() for t in (args.tags or "").split(",") if t.strip()})
+    item = {
+        "id": bookmark_id(args.url),
+        "url": args.url,
+        "title": args.title or args.url,
+        "tags": tags,
+        "added": int(time.time()),
+    }
+    merge_bookmarks(store, [item])
+    save_store(args.db, store)
+    print("added {}".format(item["id"]))
+
+
+def cmd_rm(args):
+    store = load_store(args.db)
+    before = len(store["bookmarks"])
+    store["bookmarks"] = [b for b in store["bookmarks"] if b["id"] != args.id]
+    if len(store["bookmarks"]) == before:
+        die("no bookmark with id {}".format(args.id))
+    save_store(args.db, store)
+    print("removed {}".format(args.id))
+
+
+def cmd_list(args):
+    store = load_store(args.db)
+    found = False
+    for bookmark in store["bookmarks"]:
+        if args.tag and args.tag not in bookmark["tags"]:
+            continue
+        print(render_line(bookmark))
+        found = True
+    if not found:
+        print("(no bookmarks)")
+
+
+def cmd_search(args):
+    needle = args.query.lower()
+    found = False
+    for bookmark in load_store(args.db)["bookmarks"]:
+        haystack = [bookmark["title"], bookmark["url"]] + bookmark["tags"]
+        if any(needle in field.lower() for field in haystack):
+            print(render_line(bookmark))
+            found = True
+    if not found:
+        print("(no matches)")
+
+
+def cmd_tag(args):
+    store = load_store(args.db)
+    bookmark = find_bookmark(store, args.id)
+    for tag in args.tags:
+        cleaned = tag.strip()
+        if cleaned and cleaned not in bookmark["tags"]:
+            bookmark["tags"].append(cleaned)
+    bookmark["tags"].sort()
+    save_store(args.db, store)
+    print("{} tagged {}".format(args.id, ",".join(args.tags)))
+
+
+def cmd_open(args):
+    bookmark = find_bookmark(load_store(args.db), args.id)
+    command = "xdg-open {}".format(bookmark["url"])
+    if args.dry_run:
+        print(command)
+        return
+    try:
+        subprocess.run(["xdg-open", bookmark["url"]], check=False)
+    except OSError as exc:
+        die("could not launch xdg-open: {}".format(exc))
+
+
+def cmd_stats(args):
+    bookmarks = load_store(args.db)["bookmarks"]
+    tags = {tag for bookmark in bookmarks for tag in bookmark["tags"]}
+    print("bookmarks: {}".format(len(bookmarks)))
+    print("tags: {}".format(len(tags)))
+    print("untagged: {}".format(sum(1 for b in bookmarks if not b["tags"])))
+
+
+def build_parser():
+    db_parent = argparse.ArgumentParser(add_help=False)
+    db_parent.add_argument("--db", default=argparse.SUPPRESS,
+                           help="path to the JSON store (default: ~/.local/share/bookmarkdeck/bookmarks.json)")
+    parser = argparse.ArgumentParser(
+        prog=APP,
+        description="Local bookmark manager with Netscape bookmark HTML import/export.",
+    )
+    parser.add_argument("--version", action="version", version="{} {}".format(APP, VERSION))
+    parser.add_argument("--db", default=None, help=argparse.SUPPRESS)
+    subs = parser.add_subparsers(dest="command", required=True)
+
+    p = subs.add_parser("import", parents=[db_parent], help="import Netscape bookmark HTML")
+    p.add_argument("file")
+    p.set_defaults(func=cmd_import)
+
+    p = subs.add_parser("export", parents=[db_parent], help="export Netscape bookmark HTML")
+    p.add_argument("file")
+    p.set_defaults(func=cmd_export)
+
+    p = subs.add_parser("add", parents=[db_parent], help="add a bookmark")
+    p.add_argument("url")
+    p.add_argument("--title")
+    p.add_argument("--tags", help="comma-separated tags")
+    p.set_defaults(func=cmd_add)
+
+    p = subs.add_parser("rm", parents=[db_parent], help="remove a bookmark by id")
+    p.add_argument("id")
+    p.set_defaults(func=cmd_rm)
+
+    p = subs.add_parser("list", parents=[db_parent], help="list bookmarks")
+    p.add_argument("--tag")
+    p.set_defaults(func=cmd_list)
+
+    p = subs.add_parser("search", parents=[db_parent], help="search titles, URLs and tags")
+    p.add_argument("query")
+    p.set_defaults(func=cmd_search)
+
+    p = subs.add_parser("tag", parents=[db_parent], help="add tags to a bookmark")
+    p.add_argument("id")
+    p.add_argument("tags", nargs="+")
+    p.set_defaults(func=cmd_tag)
+
+    p = subs.add_parser("open", parents=[db_parent], help="open a bookmark with xdg-open")
+    p.add_argument("id")
+    p.add_argument("--dry-run", action="store_true", help="print the command instead of running it")
+    p.set_defaults(func=cmd_open)
+
+    p = subs.add_parser("stats", parents=[db_parent], help="show bookmark statistics")
+    p.set_defaults(func=cmd_stats)
+    return parser
+
+
+def main(argv=None):
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    args.db = args.db or DEFAULT_DB
+    args.func(args)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

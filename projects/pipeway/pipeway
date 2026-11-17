@@ -1,0 +1,349 @@
+#!/usr/bin/env python3
+"""pipeway - compose small stages into a feed processing pipeline."""
+
+import argparse
+import json
+import os
+import re
+import sys
+import urllib.request
+import xml.etree.ElementTree as ET
+
+VERSION = "0.1.0"
+
+STAGE_SPECS = {
+    "fetch": {"required": ("url",)},
+    "match": {"required": ("field", "pattern")},
+    "exclude": {"required": ("field", "pattern")},
+    "dedupe": {"required": ("field",)},
+    "sort": {"required": ("field",), "enums": {"order": ("asc", "desc")}},
+    "limit": {"required": ("count",)},
+    "format": {"required": ("type",),
+               "enums": {"type": ("rss", "json", "text")}},
+}
+
+
+# ---------------------------------------------------------------------------
+# Configuration validation
+# ---------------------------------------------------------------------------
+
+def get_stages(config):
+    """Return (stages, error). A bare list or {'stages': [...]} is accepted."""
+    if isinstance(config, list):
+        return config, None
+    if isinstance(config, dict):
+        if "stages" not in config:
+            return None, "config: missing required key 'stages'"
+        if not isinstance(config["stages"], list):
+            return None, "config: 'stages' must be a list"
+        return config["stages"], None
+    return None, "config: expected a JSON object or a list of stages"
+
+
+def validate_config(config):
+    """Return a list of precise, human-readable validation errors."""
+    stages, error = get_stages(config)
+    if error:
+        return [error]
+    errors = []
+    for index, stage in enumerate(stages):
+        label = "stage %d" % index
+        if not isinstance(stage, dict):
+            errors.append("%s: expected a JSON object" % label)
+            continue
+        name = stage.get("stage")
+        if not name:
+            errors.append("%s: missing required key 'stage'" % label)
+            continue
+        if name not in STAGE_SPECS:
+            expected = ", ".join(sorted(STAGE_SPECS))
+            errors.append("%s: unknown stage '%s' (expected one of: %s)" % (
+                label, name, expected))
+            continue
+        label = "%s (%s)" % (label, name)
+        spec = STAGE_SPECS[name]
+        for key in spec["required"]:
+            if key not in stage:
+                errors.append("%s: missing required key '%s'" % (label, key))
+            elif not isinstance(stage[key], str) or not stage[key]:
+                if key != "count":
+                    errors.append("%s: '%s' must be a non-empty string" % (label, key))
+        for key, allowed in spec.get("enums", {}).items():
+            if key in stage and stage[key] not in allowed:
+                errors.append("%s: '%s' must be one of %s" % (
+                    label, key, ", ".join(allowed)))
+        if name == "limit" and "count" in stage:
+            value = stage["count"]
+            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                errors.append("%s: 'count' must be a positive integer" % label)
+        if name in ("match", "exclude") and "pattern" in stage:
+            try:
+                re.compile(stage["pattern"])
+            except (re.error, TypeError) as exc:
+                errors.append("%s: invalid regex pattern: %s" % (label, exc))
+    return errors
+
+
+# ---------------------------------------------------------------------------
+# Feed reading
+# ---------------------------------------------------------------------------
+
+def local_name(tag):
+    return tag.rsplit("}", 1)[-1] if "}" in tag else tag
+
+
+def node_text(node):
+    return "".join(node.itertext()).strip() if node is not None else ""
+
+
+def child(node, name):
+    return next((c for c in list(node) if local_name(c.tag) == name), None)
+
+
+def children(node, name):
+    return [c for c in list(node) if local_name(c.tag) == name]
+
+
+def feed_bytes(url, timeout=10):
+    if url.startswith("file://"):
+        with open(urllib.request.url2pathname(url[len("file://"):]), "rb") as handle:
+            return handle.read()
+    if not re.match(r"^https?://", url):
+        raise ValueError("unsupported URL scheme: %s" % url)
+    with urllib.request.urlopen(url, timeout=timeout) as response:
+        return response.read()
+
+
+def parse_feed(data):
+    """Parse RSS 2.0 or Atom bytes into a list of plain item dicts."""
+    root = ET.fromstring(data)
+    if local_name(root.tag) == "rss":
+        channel = child(root, "channel")
+        if channel is None:
+            raise ValueError("RSS document has no channel")
+        entries = children(channel, "item")
+        source = node_text(child(channel, "title"))
+        get_link = lambda e: node_text(child(e, "link"))
+        get_desc = lambda e: node_text(child(e, "description"))
+    elif local_name(root.tag) == "feed":
+        entries = children(root, "entry")
+        source = node_text(child(root, "title"))
+        links = children(root, "link")
+        source_link = links[0].get("href", "") if links else ""
+
+        def get_link(entry):
+            links = children(entry, "link")
+            for link in links:
+                if link.get("rel", "alternate") == "alternate" and link.get("href"):
+                    return link["href"]
+            return links[0].get("href", "") if links else ""
+
+        get_desc = lambda e: (
+            node_text(child(e, "summary")) or node_text(child(e, "content")))
+        if source_link:
+            source = source or source_link
+    else:
+        raise ValueError("not an RSS or Atom feed")
+
+    items = []
+    for entry in entries:
+        items.append({
+            "title": node_text(child(entry, "title")),
+            "link": get_link(entry),
+            "description": get_desc(entry),
+            "date": (node_text(child(entry, "pubDate"))
+                     or node_text(child(entry, "updated"))
+                     or node_text(child(entry, "published"))),
+            "guid": node_text(child(entry, "guid")) or node_text(child(entry, "id")),
+            "feedTitle": source,
+        })
+    return items
+
+
+def fetch_items(url):
+    return parse_feed(feed_bytes(url))
+
+
+# ---------------------------------------------------------------------------
+# Stages and rendering
+# ---------------------------------------------------------------------------
+
+def apply_stage(stage, items):
+    """Apply one validated stage to a list of dicts and return the new list."""
+    name = stage["stage"]
+    if name == "fetch":
+        try:
+            return items + fetch_items(stage["url"])
+        except Exception as exc:
+            print("pipeway: warning: could not fetch %s: %s" % (
+                stage["url"], exc), file=sys.stderr)
+            return items
+    if name == "match":
+        pattern = re.compile(stage["pattern"])
+        field = stage["field"]
+        return [i for i in items if pattern.search(str(i.get(field, "")))]
+    if name == "exclude":
+        pattern = re.compile(stage["pattern"])
+        field = stage["field"]
+        return [i for i in items if not pattern.search(str(i.get(field, "")))]
+    if name == "dedupe":
+        field, seen, result = stage["field"], set(), []
+        for item in items:
+            key = str(item.get(field, ""))
+            if key not in seen:
+                seen.add(key)
+                result.append(item)
+        return result
+    if name == "sort":
+        field = stage["field"]
+        reverse = stage.get("order", "asc") == "desc"
+        return sorted(items, key=lambda i: str(i.get(field, "")), reverse=reverse)
+    if name == "limit":
+        return items[:stage["count"]]
+    raise ValueError("cannot apply stage: %s" % name)
+
+
+def render_rss(items, title):
+    rss = ET.Element("rss", {"version": "2.0"})
+    channel = ET.SubElement(rss, "channel")
+    ET.SubElement(channel, "title").text = title
+    ET.SubElement(channel, "description").text = "Generated by pipeway"
+    for item in items:
+        node = ET.SubElement(channel, "item")
+        for tag, key in (("title", "title"), ("link", "link"),
+                         ("description", "description"), ("guid", "guid")):
+            ET.SubElement(node, tag).text = str(item.get(key, ""))
+    ET.indent(rss, space="  ")
+    return ET.tostring(rss, encoding="unicode", xml_declaration=True) + "\n"
+
+
+def render_json(items, title):
+    return json.dumps(items, indent=2, sort_keys=True) + "\n"
+
+
+def render_text(items, title):
+    lines = [title]
+    for item in items:
+        link = str(item.get("link", ""))
+        lines.append("%s%s" % (item.get("title", ""), "  " + link if link else ""))
+    return "\n".join(lines) + "\n"
+
+
+RENDERERS = {"rss": render_rss, "json": render_json, "text": render_text}
+
+
+def load_input(path):
+    with open(path, encoding="utf-8") as handle:
+        data = json.load(handle)
+    if isinstance(data, list):
+        return data
+    if isinstance(data, dict) and isinstance(data.get("items"), list):
+        return data["items"]
+    raise ValueError("input must be a JSON list of items")
+
+
+# ---------------------------------------------------------------------------
+# Commands and CLI
+# ---------------------------------------------------------------------------
+
+def load_config(path):
+    with open(path, encoding="utf-8") as handle:
+        return json.load(handle)
+
+
+def cmd_validate(args):
+    try:
+        config = load_config(args.config)
+    except (OSError, ValueError) as exc:
+        print("pipeway: cannot read config: %s" % exc, file=sys.stderr)
+        return 1
+    errors = validate_config(config)
+    if errors:
+        for error in errors:
+            print("pipeway: %s" % error, file=sys.stderr)
+        return 1
+    stages, _ = get_stages(config)
+    print("OK: %d stage(s) validated" % len(stages))
+    return 0
+
+
+def cmd_run(args):
+    try:
+        config = load_config(args.config)
+    except (OSError, ValueError) as exc:
+        print("pipeway: cannot read config: %s" % exc, file=sys.stderr)
+        return 1
+    errors = validate_config(config)
+    if errors:
+        for error in errors:
+            print("pipeway: %s" % error, file=sys.stderr)
+        return 1
+    stages, _ = get_stages(config)
+    try:
+        items = load_input(args.input) if args.input else []
+    except (OSError, ValueError) as exc:
+        print("pipeway: cannot read input: %s" % exc, file=sys.stderr)
+        return 1
+
+    output, title = None, "pipeway output"
+    for stage in stages:
+        if stage["stage"] == "format":
+            title = stage.get("title", title)
+            output = RENDERERS[stage["type"]](items, title)
+        else:
+            items = apply_stage(stage, items)
+    if output is None:
+        output = render_json(items, title)
+
+    if args.output:
+        parent = os.path.dirname(os.path.abspath(args.output))
+        os.makedirs(parent, exist_ok=True)
+        with open(args.output, "w", encoding="utf-8") as handle:
+            handle.write(output)
+    else:
+        sys.stdout.write(output)
+    return 0
+
+
+EXAMPLE = {
+    "name": "local-rss-example",
+    "stages": [
+        {"stage": "fetch", "url": "file:///path/to/feed.xml"},
+        {"stage": "match", "field": "title", "pattern": "."},
+        {"stage": "dedupe", "field": "link"},
+        {"stage": "sort", "field": "date", "order": "desc"},
+        {"stage": "limit", "count": 20},
+        {"stage": "format", "type": "rss", "title": "My curated feed"},
+    ],
+}
+
+
+def build_parser():
+    parser = argparse.ArgumentParser(
+        prog="pipeway", description="Composable feed processing pipelines")
+    parser.add_argument("--version", action="version", version="pipeway " + VERSION)
+    subs = parser.add_subparsers(dest="command", required=True)
+    run_parser = subs.add_parser("run", help="run a pipeline config")
+    run_parser.add_argument("config", help="path to a JSON config file")
+    run_parser.add_argument("--input", metavar="FILE", help="JSON list of seed items")
+    run_parser.add_argument("--output", metavar="FILE", help="write output to a file")
+    validate_parser = subs.add_parser("validate", help="check a pipeline config")
+    validate_parser.add_argument("config", help="path to a JSON config file")
+    subs.add_parser("example", help="print a working example config")
+    return parser
+
+
+def main(argv=None):
+    args = build_parser().parse_args(argv)
+    if args.command == "validate":
+        return cmd_validate(args)
+    if args.command == "run":
+        return cmd_run(args)
+    if args.command == "example":
+        print(json.dumps(EXAMPLE, indent=2))
+        return 0
+    return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

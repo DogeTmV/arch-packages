@@ -1,0 +1,148 @@
+#!/usr/bin/env python3
+"""snakecell - a terminal Snake game with a fully headless core.
+
+Uses snake_core.Grid for all game rules. --demo never imports curses, so it
+is safe in CI, pipes and other non-TTY environments.
+"""
+
+import argparse
+import os
+import sys
+
+VERSION = "0.1.0"
+
+
+def find_core():
+    """Locate snake_core.py in the source tree or the installed layout."""
+    here = os.path.dirname(os.path.realpath(__file__))
+    candidates = (
+        here,
+        os.path.normpath(os.path.join(here, "..", "lib", "snakecell")),
+        "/usr/lib/snakecell",
+    )
+    for directory in candidates:
+        if (os.path.isfile(os.path.join(directory, "snake_core.py"))
+                and directory not in sys.path):
+            sys.path.insert(0, directory)
+
+
+find_core()
+from snake_core import Grid  # noqa: E402
+
+TURNS = ("up", "right", "down", "left")
+OPPOSITE = {(1, 0): "left", (-1, 0): "right", (0, 1): "up", (0, -1): "down"}
+KEY_TURNS = None  # filled in only when curses is imported
+
+
+def auto_turn(grid):
+    """Deterministic demo pilot: prefer the nearest safe cell to the food."""
+    if grid.food is None:
+        return
+    head_x, head_y = grid.snake[0]
+    choices = [name for name in TURNS
+               if name != OPPOSITE.get(grid.direction)]
+    choices.sort(key=lambda name: (
+        abs(head_x + Grid.DIRECTIONS[name][0] - grid.food[0])
+        + abs(head_y + Grid.DIRECTIONS[name][1] - grid.food[1]),
+        TURNS.index(name),
+    ))
+    for name in choices:
+        dx, dy = Grid.DIRECTIONS[name]
+        target = (head_x + dx, head_y + dy)
+        body = grid.snake if target == grid.food else grid.snake[:-1]
+        if (0 <= target[0] < grid.width and 0 <= target[1] < grid.height
+                and target not in body):
+            grid.change_direction(name)
+            return
+    # No safe turn: let step() record the collision.
+
+
+def run_demo(grid, steps):
+    print("snakecell demo - seed=%s, %dx%d, %d steps"
+          % (grid.seed, grid.width, grid.height, steps))
+    for _ in range(steps):
+        if grid.game_over:
+            break
+        auto_turn(grid)
+        grid.step()
+    print("Score: %d" % grid.score)
+    print("Steps: %d" % grid.steps)
+    print("Game over: %s" % ("yes" if grid.game_over else "no"))
+    print(grid.serialize_board())
+
+
+def play(grid, speed):
+    try:
+        import curses
+    except ImportError as exc:
+        raise RuntimeError("curses is not available on this system") from exc
+
+    keys = {
+        ord("w"): "up", curses.KEY_UP: "up",
+        ord("s"): "down", curses.KEY_DOWN: "down",
+        ord("a"): "left", curses.KEY_LEFT: "left",
+        ord("d"): "right", curses.KEY_RIGHT: "right",
+    }
+
+    def session(screen):
+        curses.curs_set(0)
+        screen.nodelay(True)
+        while not grid.game_over:
+            key = screen.getch()
+            if key in (ord("q"), 27):
+                break
+            if key in keys:
+                grid.change_direction(keys[key])
+            screen.clear()
+            screen.addstr(0, 0, "snakecell  score=%d  WASD/arrows  q=quit" % grid.score)
+            for row, line in enumerate(grid.serialize_board().splitlines(), 1):
+                screen.addstr(row, 0, line)
+            screen.refresh()
+            curses.napms(speed)
+            grid.step()
+
+    curses.wrapper(session)
+    print("Final score: %d" % grid.score)
+
+
+def build_parser():
+    parser = argparse.ArgumentParser(
+        prog="snakecell",
+        description="Play Snake in the terminal, or run a deterministic demo.",
+        epilog="Examples: snakecell --demo --seed 42 --steps 30 | "
+               "snakecell --seed 7 --width 24 --height 18 --speed 90",
+    )
+    parser.add_argument("--demo", action="store_true",
+                        help="run headless steps and print the final board")
+    parser.add_argument("--steps", type=int, default=50,
+                        help="number of demo steps (default: 50)")
+    parser.add_argument("--seed", type=int, default=None,
+                        help="seed for reproducible food placement")
+    parser.add_argument("--width", type=int, default=20, help="board width (default: 20)")
+    parser.add_argument("--height", type=int, default=20, help="board height (default: 20)")
+    parser.add_argument("--speed", type=int, default=120,
+                        help="interactive tick delay in milliseconds (default: 120)")
+    parser.add_argument("--version", action="version", version="snakecell " + VERSION)
+    return parser
+
+
+def main(argv=None):
+    parser = build_parser()
+    opts = parser.parse_args(sys.argv[1:] if argv is None else argv)
+    try:
+        if opts.steps < 0:
+            raise ValueError("--steps cannot be negative")
+        if opts.speed < 0:
+            raise ValueError("--speed cannot be negative")
+        grid = Grid(width=opts.width, height=opts.height, seed=opts.seed)
+        if opts.demo:
+            run_demo(grid, opts.steps)
+        else:
+            play(grid, opts.speed)
+    except (ValueError, RuntimeError) as exc:
+        parser.exit(2, "snakecell: error: %s\n" % exc)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

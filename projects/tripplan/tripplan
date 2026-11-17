@@ -1,0 +1,402 @@
+#!/usr/bin/env python3
+"""tripplan - an offline itinerary planner with JSON, Markdown and ICS export.
+
+An original reimplementation inspired by the discontinued Google Trips.
+"""
+
+import argparse
+import collections
+import datetime as dt
+import hashlib
+import json
+import os
+import re
+import sys
+import tempfile
+
+VERSION = "0.1.0"
+DEFAULT_DIR = os.path.expanduser("~/.local/share/tripplan/trips")
+DTSTAMP = "20000101T000000Z"  # keeps exports byte-for-byte reproducible
+
+
+# ---------------------------------------------------------------------------
+# Storage and validation
+# ---------------------------------------------------------------------------
+
+def data_dir(args=None):
+    return getattr(args, "dir", None) or DEFAULT_DIR
+
+
+def slug(name):
+    return re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-") or "trip"
+
+
+def trip_path(directory, name):
+    candidate = os.path.join(directory, slug(name) + ".json")
+    if os.path.isfile(candidate):
+        return candidate
+    if os.path.isdir(directory):
+        for filename in sorted(os.listdir(directory)):
+            if not filename.endswith(".json"):
+                continue
+            path = os.path.join(directory, filename)
+            data = load_trip(path)
+            if data.get("name", "").casefold() == name.casefold():
+                return path
+    return candidate
+
+
+def load_trip(path):
+    try:
+        with open(path, encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, ValueError) as exc:
+        raise RuntimeError("cannot read trip %s: %s" % (path, exc)) from exc
+    if not isinstance(data, dict) or not isinstance(data.get("items"), list):
+        raise RuntimeError("unrecognised trip file: %s" % path)
+    data.setdefault("name", os.path.splitext(os.path.basename(path))[0])
+    data.setdefault("start", "")
+    data.setdefault("end", "")
+    return data
+
+
+def save_trip(path, data):
+    parent = os.path.dirname(os.path.abspath(path))
+    os.makedirs(parent, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=parent, prefix=".tripplan-")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(data, handle, indent=2, sort_keys=True)
+            handle.write("\n")
+        os.replace(tmp, path)
+    except BaseException:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+        raise
+
+
+def all_trips(directory):
+    if not os.path.isdir(directory):
+        return []
+    result = []
+    for filename in sorted(os.listdir(directory)):
+        if filename.endswith(".json"):
+            result.append(load_trip(os.path.join(directory, filename)))
+    return result
+
+
+def check_date(value, label):
+    if not value:
+        return ""
+    try:
+        return dt.date.fromisoformat(value).isoformat()
+    except ValueError as exc:
+        raise RuntimeError("%s must be YYYY-MM-DD" % label) from exc
+
+
+def check_time(value):
+    if not value:
+        return ""
+    try:
+        return dt.datetime.strptime(value, "%H:%M").strftime("%H:%M")
+    except ValueError as exc:
+        raise RuntimeError("time must be HH:MM") from exc
+
+
+def require_trip(directory, name):
+    path = trip_path(directory, name)
+    if not os.path.isfile(path):
+        raise RuntimeError("no such trip: %s" % name)
+    return path, load_trip(path)
+
+
+def sort_key(item):
+    try:
+        number = int(item.get("id", "0"))
+    except ValueError:
+        number = 0
+    return (item.get("date") or "9999-12-31", item.get("time") or "99:99",
+            number)
+
+
+# ---------------------------------------------------------------------------
+# Export formats
+# ---------------------------------------------------------------------------
+
+def ics_escape(value):
+    return (value.replace("\\", "\\\\").replace(";", "\\;")
+            .replace(",", "\\,").replace("\r\n", "\\n")
+            .replace("\n", "\\n").replace("\r", "\\n"))
+
+
+def fold_line(line):
+    """Fold one content line to 75 octets with a single-space continuation."""
+    parts, current = [], ""
+    for char in line:
+        if len((current + char).encode("utf-8")) > 75:
+            parts.append(current)
+            current = " " + char
+        else:
+            current += char
+    parts.append(current)
+    return "\r\n".join(parts)
+
+
+def ics_export(name, data, outfile):
+    lines = ["BEGIN:VCALENDAR", "VERSION:2.0",
+             "PRODID:-//DogeTmV//tripplan//EN", "CALSCALE:GREGORIAN"]
+    for item in sorted(data["items"], key=sort_key):
+        day = item.get("date", "")
+        if not day:
+            continue  # an event without a date cannot be a valid VEVENT
+        uid = hashlib.sha1(("%s\0%s" % (name, item.get("id", "")))
+                           .encode("utf-8")).hexdigest()[:20] + "@tripplan"
+        lines.extend(["BEGIN:VEVENT", "UID:" + uid, "DTSTAMP:" + DTSTAMP])
+        if item.get("time"):
+            start = dt.datetime.strptime(day + " " + item["time"],
+                                         "%Y-%m-%d %H:%M")
+            end = start + dt.timedelta(hours=1)
+            lines.append("DTSTART:" + start.strftime("%Y%m%dT%H%M%S"))
+            lines.append("DTEND:" + end.strftime("%Y%m%dT%H%M%S"))
+        else:
+            start = dt.date.fromisoformat(day)
+            lines.append("DTSTART;VALUE=DATE:" + start.strftime("%Y%m%d"))
+            lines.append("DTEND;VALUE=DATE:" +
+                         (start + dt.timedelta(days=1)).strftime("%Y%m%d"))
+        lines.append("SUMMARY:" + ics_escape(item.get("title", "")))
+        if item.get("location"):
+            lines.append("LOCATION:" + ics_escape(item["location"]))
+        if item.get("notes"):
+            lines.append("DESCRIPTION:" + ics_escape(item["notes"]))
+        lines.append("END:VEVENT")
+    lines.append("END:VCALENDAR")
+    with open(outfile, "w", encoding="utf-8", newline="") as handle:
+        handle.write("\r\n".join(fold_line(line) for line in lines) + "\r\n")
+
+
+def md_export(name, data, outfile):
+    lines = ["# " + name, ""]
+    if data.get("start") or data.get("end"):
+        lines.append("%s -> %s" % (data.get("start", ""), data.get("end", "")))
+        lines.append("")
+    for item in sorted(data["items"], key=sort_key):
+        stamp = " ".join(filter(None, (item.get("date", ""), item.get("time", ""))))
+        lines.append("- %s%s" % (item.get("title", ""),
+                                 " (%s)" % stamp if stamp else ""))
+        if item.get("location"):
+            lines.append("  - Location: " + item["location"])
+        if item.get("notes"):
+            lines.append("  - Notes: " + item["notes"])
+    with open(outfile, "w", encoding="utf-8") as handle:
+        handle.write("\n".join(lines) + "\n")
+
+
+def json_export(name, data, outfile):
+    with open(outfile, "w", encoding="utf-8") as handle:
+        json.dump(data, handle, indent=2, sort_keys=True)
+        handle.write("\n")
+
+
+# ---------------------------------------------------------------------------
+# Commands
+# ---------------------------------------------------------------------------
+
+def cmd_new(args):
+    directory = data_dir(args)
+    path = trip_path(directory, args.name)
+    if os.path.isfile(path):
+        raise RuntimeError("trip already exists: %s" % args.name)
+    start = check_date(args.start, "start date")
+    end = check_date(args.end, "end date")
+    if start and end and end < start:
+        raise RuntimeError("end date is before start date")
+    save_trip(path, {"name": args.name, "start": start, "end": end,
+                     "items": []})
+    print("Created trip %s (%s)" % (args.name, path))
+    return 0
+
+
+def cmd_add(args):
+    directory = data_dir(args)
+    path, trip = require_trip(directory, args.trip)
+    numbers = []
+    for item in trip["items"]:
+        try:
+            numbers.append(int(item.get("id", "0")))
+        except ValueError:
+            pass
+    item = {
+        "id": str(max(numbers, default=0) + 1),
+        "title": args.title,
+        "date": check_date(args.date, "date"),
+        "time": check_time(args.time),
+        "location": args.location or "",
+        "notes": args.notes or "",
+        "type": args.type or "",
+    }
+    trip["items"].append(item)
+    save_trip(path, trip)
+    print("Added %s to %s" % (item["id"], args.trip))
+    return 0
+
+
+def cmd_list(args):
+    trips = all_trips(data_dir(args))
+    if not trips:
+        print("No trips.")
+        return 0
+    for trip in sorted(trips, key=lambda t: t.get("name", "").casefold()):
+        span = "%s -> %s" % (trip.get("start", ""), trip.get("end", ""))
+        print("%s  %s  (%d items)" % (
+            trip.get("name", "?"), span, len(trip["items"])))
+    return 0
+
+
+def cmd_show(args):
+    _, trip = require_trip(data_dir(args), args.trip)
+    wanted = check_date(args.date, "date")
+    span = "%s -> %s" % (trip.get("start", ""), trip.get("end", ""))
+    print("%s  %s" % (trip.get("name", args.trip), span))
+    items = sorted(trip["items"], key=sort_key)
+    if wanted:
+        items = [item for item in items if item.get("date") == wanted]
+    if not items:
+        print("No items.")
+        return 0
+    for item in items:
+        when = " ".join(filter(None, (item.get("date", ""), item.get("time", ""))))
+        prefix = "[%s] " % item["type"] if item.get("type") else ""
+        print("%s  %s%s%s" % (item["id"], when or "-", "  " if when else " ",
+                              prefix + item.get("title", "")))
+        if item.get("location"):
+            print("      Location: " + item["location"])
+        if item.get("notes"):
+            print("      Notes: " + item["notes"])
+    return 0
+
+
+def cmd_rm(args):
+    directory = data_dir(args)
+    path, trip = require_trip(directory, args.trip)
+    before = len(trip["items"])
+    trip["items"] = [item for item in trip["items"]
+                     if item.get("id") != args.id]
+    if len(trip["items"]) == before:
+        raise RuntimeError("no such item: %s" % args.id)
+    save_trip(path, trip)
+    print("Removed %s from %s" % (args.id, args.trip))
+    return 0
+
+
+def cmd_export(args):
+    _, trip = require_trip(data_dir(args), args.trip)
+    parent = os.path.dirname(os.path.abspath(args.outfile))
+    os.makedirs(parent, exist_ok=True)
+    exporters = {"ics": ics_export, "md": md_export, "json": json_export}
+    exporters[args.format](args.trip, trip, args.outfile)
+    print("Exported %s (%s) to %s" % (args.trip, args.format, args.outfile))
+    return 0
+
+
+def cmd_import(args):
+    directory = data_dir(args)
+    path = trip_path(directory, args.trip)
+    if os.path.isfile(path):
+        raise RuntimeError("trip already exists: %s" % args.trip)
+    try:
+        with open(args.infile, encoding="utf-8") as handle:
+            source = json.load(handle)
+    except (OSError, ValueError) as exc:
+        raise RuntimeError("cannot read import file: %s" % exc) from exc
+    if not isinstance(source, dict) or not isinstance(source.get("items"), list):
+        raise RuntimeError("not a tripplan JSON export: %s" % args.infile)
+    items = []
+    for raw in source["items"]:
+        if not isinstance(raw, dict) or not raw.get("title"):
+            raise RuntimeError("malformed item in %s" % args.infile)
+        items.append({
+            "id": str(raw.get("id", len(items) + 1)),
+            "title": str(raw["title"]),
+            "date": check_date(str(raw.get("date", "")), "date"),
+            "time": check_time(str(raw.get("time", ""))),
+            "location": str(raw.get("location", "")),
+            "notes": str(raw.get("notes", "")),
+            "type": str(raw.get("type", "")),
+        })
+    save_trip(path, {
+        "name": args.trip,
+        "start": check_date(str(source.get("start", "")), "start date"),
+        "end": check_date(str(source.get("end", "")), "end date"),
+        "items": items,
+    })
+    print("Imported %d items into %s" % (len(items), args.trip))
+    return 0
+
+
+def cmd_stats(args):
+    trips = all_trips(data_dir(args))
+    items = [item for trip in trips for item in trip["items"]]
+    types = collections.Counter(item.get("type") or "uncategorised"
+                                for item in items)
+    print("Trips: %d" % len(trips))
+    print("Items: %d" % len(items))
+    if types:
+        print("Types: " + ", ".join("%s=%d" % pair
+                                    for pair in sorted(types.items())))
+    return 0
+
+
+COMMANDS = {
+    "new": cmd_new, "add": cmd_add, "list": cmd_list, "show": cmd_show,
+    "rm": cmd_rm, "export": cmd_export, "import": cmd_import,
+    "stats": cmd_stats,
+}
+
+
+def build_parser():
+    parser = argparse.ArgumentParser(
+        prog="tripplan", description="Offline itinerary planner")
+    parser.add_argument("--version", action="version",
+                        version="tripplan " + VERSION)
+    subs = parser.add_subparsers(dest="command", required=True)
+
+    def sub(name, help_text, *positionals):
+        child = subs.add_parser(name, help=help_text)
+        child.add_argument("--dir", metavar="PATH", help="trips directory")
+        for positional in positionals:
+            child.add_argument(positional)
+        return child
+
+    new = sub("new", "create a trip", "name")
+    new.add_argument("--start", metavar="DATE")
+    new.add_argument("--end", metavar="DATE")
+
+    add = sub("add", "add an item to a trip", "trip", "title")
+    add.add_argument("--date", metavar="YYYY-MM-DD")
+    add.add_argument("--time", metavar="HH:MM")
+    add.add_argument("--location", metavar="TEXT")
+    add.add_argument("--notes", metavar="TEXT")
+    add.add_argument("--type", metavar="TYPE")
+
+    sub("list", "list saved trips")
+    show = sub("show", "show a trip's itinerary", "trip")
+    show.add_argument("--date", metavar="DATE")
+    sub("rm", "remove an item", "trip", "id")
+    export = sub("export", "export a trip", "trip", "outfile")
+    export.add_argument("--format", choices=("ics", "md", "json"), default="md")
+    sub("import", "import a trip from JSON", "trip", "infile")
+    sub("stats", "show collection statistics")
+    return parser
+
+
+def main(argv=None):
+    args = build_parser().parse_args(argv)
+    try:
+        return COMMANDS[args.command](args)
+    except (RuntimeError, OSError, ValueError, KeyError) as exc:
+        print("tripplan: %s" % exc, file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
