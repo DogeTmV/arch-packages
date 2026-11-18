@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">LanBridge</string>
+    <string name="accessibility_description">Allows LanBridge to perform taps, swipes and navigation actions requested from your paired PC when you explicitly connect. Enable only on trusted devices/networks.</string>
+</resources>

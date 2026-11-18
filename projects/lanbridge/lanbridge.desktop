@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=LanBridge
+Comment=Connect and control your Android phone over LAN
+Exec=lanbridge
+Icon=lanbridge
+Terminal=false
+Categories=Network;Utility;
+Keywords=phone;android;lan;bridge;screen;clipboard;
