@@ -11,6 +11,7 @@ import random
 
 from core import argument_default
 from expressions import KEYS, parse_expression
+from images import ImageError, decode_png
 
 
 def _num(value):
@@ -64,6 +65,8 @@ class PreviewEngine:
         self.mouse = (0.0, 0.0)
         self.variables = {}
         self.sprites = []
+        self.images = {}
+        self.backdrop = project.backdrop
         self.lines = []
         self.pen_active = False
         self.pen_color = "#2dd4bf"
@@ -87,6 +90,8 @@ class PreviewEngine:
         self.pen_color = "#2dd4bf"
         self.pen_size = 3
         self.background = self.project.background
+        self.backdrop = self.project.backdrop
+        self._sync_images()
         for variable in self.project.variables:
             self.variables[variable.name] = {
                 "number": 0.0, "text": "", "bool": False
@@ -102,10 +107,21 @@ class PreviewEngine:
             "layer": int(sprite.layer),
             "shape": sprite.shape,
             "color": sprite.color,
+            "image": sprite.image,
             "visible": bool(sprite.visible),
             "say_until": 0.0,
             "say_text": "",
         } for sprite in self.project.sprites]
+
+    def _sync_images(self):
+        """Decode embedded PNGs once so the stage can draw them as QImages."""
+        self.images.clear()
+        for name, payload in self.project.assets.items():
+            try:
+                width, height, rgba = decode_png(payload)
+            except ImageError:
+                continue
+            self.images[name] = (width, height, rgba)
 
     def _script_thread(self, script):
         sprite = next((index for index, item in enumerate(self.project.sprites)
@@ -142,6 +158,8 @@ class PreviewEngine:
         if self.running:
             return
         self.background = self.project.background
+        self.backdrop = self.project.backdrop
+        self._sync_images()
         self.variables = {
             variable.name: {"number": 0.0, "text": "", "bool": False}[variable.type]
             for variable in self.project.variables
@@ -158,6 +176,7 @@ class PreviewEngine:
             "layer": int(sprite.layer),
             "shape": sprite.shape,
             "color": sprite.color,
+            "image": sprite.image,
             "visible": bool(sprite.visible),
             "say_until": 0.0,
             "say_text": "",
@@ -475,6 +494,9 @@ class PreviewEngine:
             item_state["costume"] = item_state["costume"] % count + 1
         elif kind == "looks_set_background":
             self.background = _text(fields.get("color", "#151a26"))
+            self.backdrop = ""
+        elif kind == "looks_set_backdrop":
+            self.backdrop = _text(fields.get("backdrop", ""))
         elif kind in ("sound_tone", "control_wait"):
             yield max(0.0, number("secs"))
         elif kind == "sound_stop":

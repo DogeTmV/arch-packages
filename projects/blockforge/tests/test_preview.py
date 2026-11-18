@@ -3,6 +3,7 @@
 import unittest
 
 from core import Project, Sprite, Variable, block
+from images import encode_rgba_png
 from preview import PreviewEngine
 
 
@@ -11,7 +12,7 @@ def _key_project():
         name="Key",
         sprites=[Sprite(name="Bot")],
         scripts=[{
-            "sprite": "Bot", "x": 32, "y": 32,
+            "target": "spirit", "sprite": "Bot", "x": 32, "y": 32,
             "blocks": [
                 block("event_key", key="space"),
                 block("control_print", value='"pressed"'),
@@ -26,7 +27,7 @@ def _project(*blocks):
         variables=[Variable("score", "number")],
         sprites=[Sprite(name="Bot")],
         scripts=[{
-            "sprite": "Bot", "x": 32, "y": 32,
+            "target": "spirit", "sprite": "Bot", "x": 32, "y": 32,
             "blocks": [block("event_flag"), *blocks],
         }],
     )
@@ -151,6 +152,51 @@ class PreviewEngineTests(unittest.TestCase):
         engine = self._run(project, steps=4)
         self.assertEqual(len(engine.lines), 1)
         self.assertAlmostEqual(engine.lines[0][2], 10.0)
+
+
+    def test_picture_assets_are_decoded_for_stage_drawing(self):
+        picture = encode_rgba_png(2, 2, bytes([9, 8, 7, 255] * 4))
+        project = Project(
+            name="Picture",
+            sprites=[Sprite(name="Bot", image="hero.png")],
+            assets={"hero.png": picture},
+        )
+        engine = PreviewEngine(project)
+        self.assertEqual(engine.images["hero.png"][2], bytes([9, 8, 7, 255] * 4))
+        self.assertEqual(engine.sprites[0]["image"], "hero.png")
+
+    def test_stage_script_switches_the_backdrop(self):
+        backdrop = encode_rgba_png(2, 2, bytes([4, 5, 6, 255] * 4))
+        project = Project(
+            name="Backdrop",
+            assets={"night.png": backdrop},
+            backdrop="",
+            scripts=[{
+                "target": "stage", "x": 0, "y": 0,
+                "blocks": [block("event_flag"),
+                           block("looks_set_backdrop", backdrop="night.png")],
+            }],
+        )
+        engine = PreviewEngine(project)
+        engine.start()
+        engine.step(0.05)
+        self.assertEqual(engine.backdrop, "night.png")
+        self.assertIn("night.png", engine.images)
+
+    def test_setting_a_plain_background_clears_the_backdrop(self):
+        project = Project(
+            name="Background",
+            scripts=[{
+                "target": "stage", "x": 0, "y": 0,
+                "blocks": [block("event_flag"),
+                           block("looks_set_background", color="#123456")],
+            }],
+        )
+        engine = PreviewEngine(project)
+        engine.start()
+        engine.step(0.05)
+        self.assertEqual(engine.background, "#123456")
+        self.assertEqual(engine.backdrop, "")
 
 
 if __name__ == "__main__":

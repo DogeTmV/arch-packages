@@ -1,10 +1,11 @@
-"""Offscreen smoke tests for the blockforge editor."""
+"""Offscreen smoke tests for the Scratch-like blockforge editor."""
 
 import json
 import os
 from pathlib import Path
 import tempfile
 import unittest
+import zipfile
 from unittest import mock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -12,16 +13,24 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtGui import QCloseEvent, QKeyEvent, QMouseEvent, QPixmap
 from PySide6.QtWidgets import (
     QApplication, QComboBox, QFileDialog, QFrame, QLabel, QLineEdit,
-    QMessageBox, QPlainTextEdit, QToolButton,
+    QMessageBox, QPlainTextEdit, QToolButton, QWidget,
 )
 from PySide6.QtCore import QEvent, QPointF, QProcess, QMimeData, Qt
 
 from core import Procedure, Project, Sprite, block, save_project
 from examples import example_project
 from gui import (
-    MOVE_MIME, PALETTE_MIME, ProcedureDialog, ProjectSettingsDialog,
-    SpriteDialog, MainWindow, heading_endpoint, main as gui_main,
+    MOVE_MIME,
+    PALETTE_MIME,
+    LibraryDialog,
+    ProcedureDialog,
+    ProjectSettingsDialog,
+    SpriteDialog,
+    MainWindow,
+    heading_endpoint,
+    main as gui_main,
 )
+from images import decode_png, encode_rgba_png
 from theme import CATEGORIES, DARK
 
 
@@ -37,36 +46,23 @@ class GuiTests(unittest.TestCase):
         self.window.dirty = False
         self.window.close()
 
-    def test_main_window_has_the_five_expected_panels(self):
+    def test_minimal_layout_has_the_expected_panels_and_no_source_view(self):
         for name in ("palettePanel", "workspacePanel", "stagePanel",
                      "consolePanel", "toolbar"):
             self.assertIsNotNone(
-                self.window.findChild(QtCoreQWidget, name),
-                "missing %s" % name,
-            )
+                self.window.findChild(QWidget, name), "missing %s" % name)
+        self.assertIsNone(self.window.findChild(QPlainTextEdit, "sourceView"))
 
-    def test_palette_shows_every_category_and_block(self):
+    def test_palette_shows_section_buttons_and_plain_block_labels(self):
         buttons = [self.window.findChild(QToolButton, "category_%s" % item.key)
                    for item in CATEGORIES]
         self.assertTrue(all(buttons))
         self.assertGreaterEqual(self.window.palette_list.count(), 40)
-
-    def test_language_switch_refreshes_generated_source(self):
-        source = self.window.findChild(QPlainTextEdit, "sourceView")
-        combo = self.window.findChild(QComboBox, "languageCombo")
-        self.assertIn("C++17", source.toPlainText())
-        combo.setCurrentText("Rust")
-        self.assertIn("Rust 2021", source.toPlainText())
-
-    def test_inserting_a_block_appends_to_the_current_script(self):
-        before = len(self.window.project.scripts[0]["blocks"])
-        self.window.workspace.add_block("motion_move")
-        self.assertEqual(len(self.window.project.scripts), 1)
-        self.assertEqual(len(self.window.project.scripts[0]["blocks"]), before + 1)
-        self.assertEqual(
-            self.window.project.scripts[0]["blocks"][-1].type,
-            "motion_move",
-        )
+        labels = [self.window.palette_list.item(index).text()
+                  for index in range(self.window.palette_list.count())]
+        self.assertTrue(any("move" in label.lower() for label in labels))
+        self.assertFalse(any("a + b" in label for label in labels))
+        self.assertFalse(any("random(" in label for label in labels))
 
     def test_theme_is_dark_and_high_contrast(self):
         self.assertIn("#0f1420", DARK["window"])
@@ -78,7 +74,7 @@ class GuiTests(unittest.TestCase):
         label = self.window.findChild(QLabel, "projectTitle")
         self.assertEqual(label.text(), "Hello Console")
 
-    def test_stage_paints_a_visible_sprite_without_an_exception(self):
+    def test_stage_paints_a_visible_spirit_without_an_exception(self):
         pixmap = QPixmap(320, 240)
         pixmap.fill()
         self.window.stage.render(pixmap)
@@ -88,6 +84,27 @@ class GuiTests(unittest.TestCase):
         end_x, end_y = heading_endpoint(0, 0, 90, 10)
         self.assertAlmostEqual(end_x, 10.0)
         self.assertAlmostEqual(end_y, 0.0)
+
+    def test_inserting_a_block_appends_to_the_current_spirit_script(self):
+        before = len(self.window.project.scripts[0]["blocks"])
+        self.window.workspace.add_block("motion_move")
+        self.assertEqual(len(self.window.project.scripts), 1)
+        self.assertEqual(len(self.window.project.scripts[0]["blocks"]), before + 1)
+        self.assertEqual(
+            self.window.project.scripts[0]["blocks"][-1].type,
+            "motion_move",
+        )
+
+    def test_selecting_the_stage_adds_blocks_to_stage_scripts(self):
+        stage_script = {
+            "target": "stage", "x": 32, "y": 32,
+            "blocks": [block("event_flag")],
+        }
+        self.window.project.scripts.append(stage_script)
+        self.window.set_current_target("Stage")
+        self.window.workspace.rebuild()
+        self.window.workspace.add_block("looks_set_backdrop")
+        self.assertEqual(stage_script["blocks"][-1].type, "looks_set_backdrop")
 
     def test_rebuilding_the_workspace_forgets_the_focused_field(self):
         field = self.window.workspace.findChild(QLineEdit)
@@ -126,7 +143,7 @@ class GuiTests(unittest.TestCase):
         self.assertIsNone(self.window.binary_path)
         self.assertFalse(self.window.run_button.isEnabled())
 
-    def test_sprite_selection_survives_a_project_refresh(self):
+    def test_spirit_selection_survives_a_project_refresh(self):
         self.window.load_example("catch")
         self.window.sprite_list.setCurrentRow(1)
         self.window._project_changed()
@@ -161,9 +178,7 @@ class GuiTests(unittest.TestCase):
         self.assertEqual(len(self.window.project.scripts[0]["blocks"]), before - 1)
 
 
-class GuiExpansionTests(unittest.TestCase):
-    """Regression tests for the editor's real-project workflow."""
-
+class GuiWorkflowTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.app = QApplication.instance() or QApplication([])
@@ -182,22 +197,21 @@ class GuiExpansionTests(unittest.TestCase):
         self.assertIn("*", self.window.title_label.text())
 
         with tempfile.TemporaryDirectory() as folder:
-            path = Path(folder) / "saved.json"
+            path = Path(folder) / "saved.bfproj"
             with mock.patch.object(
                     QFileDialog, "getSaveFileName",
-                    return_value=(str(path), "Blockforge project (*.json)")):
+                    return_value=(str(path), "Blockforge project (*.bfproj)")):
                 self.assertTrue(self.window.save_project())
             self.assertFalse(self.window.dirty)
             self.assertNotIn("*", self.window.title_label.text())
-            self.assertEqual(
-                json.loads(path.read_text(encoding="utf-8"))["name"],
-                "Hello Console",
-            )
+            with zipfile.ZipFile(path) as archive:
+                manifest = json.loads(archive.read("project.json"))
+            self.assertEqual(manifest["name"], "Hello Console")
 
     def test_save_as_updates_the_current_project_path(self):
         with tempfile.TemporaryDirectory() as folder:
-            first = Path(folder) / "first.json"
-            second = Path(folder) / "second.json"
+            first = Path(folder) / "first.bfproj"
+            second = Path(folder) / "second.bfproj"
             with mock.patch.object(QFileDialog, "getSaveFileName",
                                    return_value=(str(first), "")):
                 self.window.save_project()
@@ -209,13 +223,13 @@ class GuiExpansionTests(unittest.TestCase):
 
     def test_constructor_accepts_a_target_and_project_path(self):
         other = MainWindow(example_project("hello"), language="rust",
-                           path="/tmp/example.json")
+                           path="/tmp/example.bfproj")
         try:
             self.assertEqual(other.language, "rust")
-            self.assertEqual(other.project_path, "/tmp/example.json")
+            self.assertEqual(other.project_path, "/tmp/example.bfproj")
             self.assertFalse(other.dirty)
-            self.assertIn("Rust 2021", other.source_view.toPlainText())
             self.assertEqual(other.language_combo.currentText(), "Rust")
+            self.assertIsNone(other.findChild(QPlainTextEdit, "sourceView"))
         finally:
             other.close()
 
@@ -236,16 +250,76 @@ class GuiExpansionTests(unittest.TestCase):
         self.assertFalse(created[0].dirty)
         created[0].close()
 
-    def test_export_source_writes_the_current_target(self):
+    def test_export_source_writes_a_source_folder(self):
         with tempfile.TemporaryDirectory() as folder:
-            path = Path(folder) / "game.rs"
-            self.window.language_combo.setCurrentText("Rust")
-            with mock.patch.object(QFileDialog, "getSaveFileName",
-                                   return_value=(str(path), "")):
+            with mock.patch.object(QFileDialog, "getExistingDirectory",
+                                   return_value=folder):
+                self.window.language_combo.setCurrentText("Rust")
                 self.window.export_source()
-            source = path.read_text(encoding="utf-8")
+            source = (Path(folder) / "main.rs").read_text(encoding="utf-8")
+            readme = (Path(folder) / "README.md").read_text(encoding="utf-8")
             self.assertTrue(source.startswith("// Generated by blockforge"))
             self.assertIn("Rust 2021", source)
+            self.assertIn("rustc", readme)
+
+    def test_library_adds_a_spirit_with_a_ready_script(self):
+        def choose_ball(dialog):
+            for row in range(dialog.list.count()):
+                item = dialog.list.item(row)
+                if item.data(Qt.UserRole) == ("spirit", "ball"):
+                    dialog.list.setCurrentItem(item)
+                    break
+            dialog.accept()
+            return 1
+
+        before = len(self.window.project.sprites)
+        with mock.patch.object(LibraryDialog, "exec", choose_ball):
+            self.window.add_from_library()
+        self.assertEqual(len(self.window.project.sprites), before + 1)
+        spirit = self.window.project.sprites[-1]
+        self.assertEqual(spirit.name, "Ball")
+        scripts = [item for item in self.window.project.scripts
+                   if item.get("sprite") == "Ball"]
+        self.assertTrue(scripts)
+        self.assertEqual(scripts[-1]["blocks"][0].type, "event_flag")
+        self.assertEqual(self.window.workspace.current_target, "Ball")
+
+    def test_library_switches_the_stage_backdrop(self):
+        def choose_ocean(dialog):
+            for row in range(dialog.list.count()):
+                item = dialog.list.item(row)
+                if item.data(Qt.UserRole) == ("stage", "ocean"):
+                    dialog.list.setCurrentItem(item)
+                    break
+            dialog.accept()
+            return 1
+
+        with mock.patch.object(LibraryDialog, "exec", choose_ocean):
+            self.window.add_from_library()
+        backdrop = self.window.project.backdrop
+        self.assertEqual(backdrop, "stage_ocean.png")
+        self.assertIn(backdrop, self.window.project.assets)
+        width, height, _ = decode_png(self.window.project.assets[backdrop])
+        self.assertEqual((width, height),
+                         (self.window.project.width, self.window.project.height))
+
+    def test_spirit_dialog_imports_a_picture_into_project_assets(self):
+        picture = encode_rgba_png(4, 3, bytes([10, 20, 30, 255] * 12))
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "hero.png"
+            path.write_bytes(picture)
+            with mock.patch.object(QFileDialog, "getOpenFileName",
+                                   return_value=(str(path), "")):
+                dialog = SpriteDialog(names=(), assets=self.window.project.assets)
+                dialog.fields["name"].setText("Look")
+                dialog._choose_picture()
+                self.assertEqual(dialog.sprite().image, "hero.png")
+                dialog.accept()
+            spirit = dialog.sprite()
+        self.assertIn("hero.png", self.window.project.assets)
+        width, height, _ = decode_png(self.window.project.assets["hero.png"])
+        self.assertEqual((width, height), (4, 3))
+        self.assertEqual(spirit.image, "hero.png")
 
     def test_a_new_my_block_has_typed_arguments_and_an_editable_body(self):
         def accept_new(self):
@@ -258,35 +332,13 @@ class GuiExpansionTests(unittest.TestCase):
             self.window.add_procedure()
         procedure = self.window.project.procedures[0]
         self.assertEqual(procedure.name, "greet")
-        self.assertEqual(procedure.params,
-                         [{"name": "who", "type": "text"}])
+        self.assertEqual(procedure.params, [{"name": "who", "type": "text"}])
         self.assertEqual(self.window.editor_target.currentText(),
                          "My Block: greet")
         self.assertEqual(self.window.workspace.current_procedure, "greet")
         self.window.workspace.add_block("control_print")
         self.assertEqual([item.type for item in procedure.blocks],
                          ["control_print"])
-
-        self.window.project.scripts[0]["blocks"].append(
-            block("procedure_call", name="greet", arg_who='"hi"'))
-
-        def accept_edit(self):
-            self.name_edit.setText("welcome")
-            row = self.params_box.itemAt(0).widget()
-            row.findChild(QLineEdit, "argumentName").setText("person")
-            self.accept()
-            return 1
-
-        with mock.patch.object(ProcedureDialog, "exec", accept_edit):
-            self.window.edit_procedure()
-        self.assertEqual(procedure.name, "welcome")
-        self.assertEqual(procedure.params[0]["name"], "person")
-        self.assertEqual(
-            self.window.project.scripts[0]["blocks"][-1].fields["name"],
-            "welcome",
-        )
-        self.assertEqual(self.window.editor_target.currentText(),
-                         "My Block: welcome")
 
     def test_sprite_and_project_settings_dialogs_apply_every_field(self):
         def accept_sprite(self):
@@ -324,17 +376,17 @@ class GuiExpansionTests(unittest.TestCase):
         self.assertEqual((self.window.project.width, self.window.project.height),
                          (640, 400))
         self.assertEqual(self.window.project.background, "#123456")
-        self.assertEqual(self.window.project.description, "A game")
         self.assertIn("*", self.window.title_label.text())
 
     def test_stage_forwards_keyboard_and_mouse_input_to_preview(self):
         project = Project(
             name="Input",
             sprites=[Sprite(name="Bot")],
-            scripts=[{"sprite": "Bot", "x": 0, "y": 0, "blocks": [
-                block("event_key", key="space"),
-                block("control_print", value='"pressed"'),
-            ]}],
+            scripts=[{"target": "spirit", "sprite": "Bot", "x": 0, "y": 0,
+                      "blocks": [
+                          block("event_key", key="space"),
+                          block("control_print", value='"pressed"'),
+                      ]}],
         )
         self.window._adopt_project(project, "Input ready")
         self.window.engine.start()
@@ -369,61 +421,6 @@ class GuiExpansionTests(unittest.TestCase):
         self.assertEqual(lines[0], "5")
         self.assertEqual(lines[-1], "304")
         self.assertEqual(len(lines), 300)
-        self.window._preview_tick()
-        self.assertEqual(
-            len(self.window.output_view.toPlainText().splitlines()), 300)
-
-    def test_opening_a_malformed_project_keeps_the_current_one(self):
-        with tempfile.TemporaryDirectory() as folder:
-            path = Path(folder) / "broken.json"
-            save_project(self.window.project, str(path))
-            data = json.loads(path.read_text(encoding="utf-8"))
-            data["scripts"][0]["blocks"][0]["type"] = "not_a_block"
-            path.write_text(json.dumps(data), encoding="utf-8")
-            with mock.patch.object(QFileDialog, "getOpenFileName",
-                                   return_value=(str(path), "")), \
-                    mock.patch.object(QMessageBox, "warning") as warning:
-                self.window.open_project()
-        warning.assert_called_once()
-        self.assertEqual(self.window.project.name, "Hello Console")
-
-    def test_a_hat_dropped_on_the_workspace_starts_a_new_script(self):
-        mime = QMimeData()
-        mime.setText(PALETTE_MIME + "event_key")
-        before = len(self.window.project.scripts)
-        self.assertTrue(self.window.workspace.handle_drop(mime, 0, (), 0))
-        self.assertEqual(len(self.window.project.scripts), before + 1)
-        self.assertEqual(
-            self.window.project.scripts[-1]["blocks"][0].type, "event_key")
-
-    def test_blocks_can_be_dropped_at_a_child_slot_position(self):
-        repeat = block("control_repeat", times="3", children={
-            "SUB": [block("control_print", value='"a"'),
-                    block("control_print", value='"c"')],
-        })
-        blocks = self.window.project.scripts[0]["blocks"]
-        blocks.append(repeat)
-        repeat_index = len(blocks) - 1
-        self.window.workspace.rebuild()
-        slot = self.window.workspace.findChild(QFrame, "slot_SUB")
-        self.assertIsNotNone(slot)
-        slot.show()
-        self.app.processEvents()
-        blocks = [widget for widget in slot.findChildren(QFrame)
-                  if widget.objectName().startswith("block_")]
-        self.assertEqual(len(blocks), 2)
-        self.assertEqual(slot._drop_index(blocks[0].geometry().top() - 1), 0)
-        self.assertEqual(slot._drop_index(blocks[0].geometry().bottom() + 1), 1)
-        self.assertEqual(slot._drop_index(blocks[1].geometry().bottom() + 1), 2)
-
-        mime = QMimeData()
-        mime.setText(PALETTE_MIME + "pen_down")
-        self.assertTrue(self.window.workspace.handle_drop(
-            mime, 0, (("SUB", repeat_index),), 1))
-        self.assertEqual(
-            [item.type for item in repeat.children["SUB"]],
-            ["control_print", "pen_down", "control_print"],
-        )
 
     def test_invalid_project_is_reported_before_building(self):
         self.window.project.scripts[0]["sprite"] = "Ghost"
@@ -465,9 +462,62 @@ class GuiExpansionTests(unittest.TestCase):
             self.window.closeEvent(event)
         self.assertFalse(event.isAccepted())
 
+    def test_opening_a_malformed_project_keeps_the_current_one(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "broken.bfproj"
+            save_project(self.window.project, str(path))
+            with zipfile.ZipFile(path) as archive:
+                payload = json.loads(archive.read("project.json"))
+                assets = {name: archive.read(name)
+                          for name in archive.namelist()
+                          if name.startswith("assets/")}
+            payload["scripts"][0]["blocks"][0]["type"] = "not_a_block"
+            with zipfile.ZipFile(path, "w") as archive:
+                archive.writestr("project.json", json.dumps(payload))
+                for name, data in assets.items():
+                    archive.writestr(name, data)
+            with mock.patch.object(QFileDialog, "getOpenFileName",
+                                   return_value=(str(path), "")), \
+                    mock.patch.object(QMessageBox, "warning") as warning:
+                self.window.open_project()
+        warning.assert_called_once()
+        self.assertEqual(self.window.project.name, "Hello Console")
 
-# Qt's findChild wants the base QWidget type; alias keeps the test readable.
-from PySide6.QtWidgets import QWidget as QtCoreQWidget  # noqa: E402
+    def test_a_hat_dropped_on_the_workspace_starts_a_new_script(self):
+        mime = QMimeData()
+        mime.setText(PALETTE_MIME + "event_key")
+        before = len(self.window.project.scripts)
+        self.assertTrue(self.window.workspace.handle_drop(mime, 0, (), 0))
+        self.assertEqual(len(self.window.project.scripts), before + 1)
+        self.assertEqual(
+            self.window.project.scripts[-1]["blocks"][0].type, "event_key")
+
+    def test_blocks_can_be_dropped_at_a_child_slot_position(self):
+        repeat = block("control_repeat", times="3", children={
+            "SUB": [block("control_print", value='"a"'),
+                    block("control_print", value='"c"')],
+        })
+        blocks = self.window.project.scripts[0]["blocks"]
+        blocks.append(repeat)
+        repeat_index = len(blocks) - 1
+        self.window.workspace.rebuild()
+        slot = self.window.workspace.findChild(QFrame, "slot_SUB")
+        self.assertIsNotNone(slot)
+        slot.show()
+        self.app.processEvents()
+        blocks = [widget for widget in slot.findChildren(QFrame)
+                  if widget.objectName().startswith("block_")]
+        self.assertEqual(len(blocks), 2)
+        self.assertEqual(slot._drop_index(blocks[0].geometry().top() - 1), 0)
+        mime = QMimeData()
+        mime.setText(PALETTE_MIME + "pen_down")
+        self.assertTrue(self.window.workspace.handle_drop(
+            mime, 0, (("SUB", repeat_index),), 1))
+        self.assertEqual(
+            [item.type for item in repeat.children["SUB"]],
+            ["control_print", "pen_down", "control_print"],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

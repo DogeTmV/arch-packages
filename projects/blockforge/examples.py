@@ -7,6 +7,7 @@ blocks map onto generated C++ or Rust source.
 from copy import deepcopy
 
 from core import Project, Sprite, Variable, block, validate_project
+from images import make_backdrop_png
 
 
 def _hello():
@@ -15,7 +16,7 @@ def _hello():
         description="A first real C++ or Rust program: print and exit.",
         sprites=[Sprite(name="Mascot")],
         scripts=[{
-            "sprite": "Mascot", "x": 48, "y": 48,
+            "target": "spirit", "sprite": "Mascot", "x": 48, "y": 48,
             "blocks": [
                 block("event_flag"),
                 block("control_print", value='"Hello, world!"'),
@@ -34,7 +35,7 @@ def _bounce():
         sprites=[Sprite(name="Ball", shape="circle", color="#38bdf8",
                         x=-140, y=80, direction=42)],
         scripts=[{
-            "sprite": "Ball", "x": 48, "y": 48,
+            "target": "spirit", "sprite": "Ball", "x": 48, "y": 48,
             "blocks": [
                 block("event_flag"),
                 block("control_forever", children={"SUB": [
@@ -58,7 +59,7 @@ def _catch():
         ],
         scripts=[
             {
-                "sprite": "Hero", "x": 40, "y": 40,
+                "target": "spirit", "sprite": "Hero", "x": 40, "y": 40,
                 "blocks": [
                     block("event_flag"),
                     block("variable_set", name="score", value="0"),
@@ -93,7 +94,7 @@ def _catch():
                 ],
             },
             {
-                "sprite": "Star", "x": 480, "y": 40,
+                "target": "spirit", "sprite": "Star", "x": 480, "y": 40,
                 "blocks": [
                     block("event_flag"),
                     block("control_forever", children={"SUB": [
@@ -113,7 +114,7 @@ def _draw():
         description="Draws a colorful spiral with the pen blocks.",
         sprites=[Sprite(name="Pen", shape="rect", color="#2dd4bf")],
         scripts=[{
-            "sprite": "Pen", "x": 40, "y": 40,
+            "target": "spirit", "sprite": "Pen", "x": 40, "y": 40,
             "blocks": [
                 block("event_flag"),
                 block("pen_clear"),
@@ -136,7 +137,7 @@ def _tone():
         description="Plays a short melody; great for testing sound blocks.",
         sprites=[Sprite(name="Speaker", shape="circle", color="#d95fd6")],
         scripts=[{
-            "sprite": "Speaker", "x": 40, "y": 40,
+            "target": "spirit", "sprite": "Speaker", "x": 40, "y": 40,
             "blocks": [
                 block("event_flag"),
                 block("control_repeat", times="4", children={"SUB": [
@@ -149,12 +150,45 @@ def _tone():
     )
 
 
+def _night():
+    return Project(
+        name="Night Scene",
+        description="A stage script changes the backdrop while a spirit glides.",
+        assets={"stage_night.png": make_backdrop_png("night", 64, 48)},
+        backdrop="stage_night.png",
+        sprites=[Sprite(name="Mascot", shape="star", color="#c4b5fd",
+                        x=-80, y=30)],
+        scripts=[
+            {
+                "target": "stage", "x": 32, "y": 32,
+                "blocks": [
+                    block("event_flag"),
+                    block("control_wait", secs="0.5"),
+                    block("looks_set_backdrop", backdrop="stage_night.png"),
+                    block("control_print", value='"Night has arrived"'),
+                ],
+            },
+            {
+                "target": "spirit", "sprite": "Mascot", "x": 32, "y": 32,
+                "blocks": [
+                    block("event_flag"),
+                    block("control_forever", children={"SUB": [
+                        block("motion_move", steps="3"),
+                        block("motion_bounce_edge"),
+                    ]}),
+                ],
+            },
+        ],
+    )
+
+
 EXAMPLES = {
     "hello": _hello,
     "bounce": _bounce,
     "catch": _catch,
     "draw": _draw,
     "tone": _tone,
+    "night": _night,
 }
 EXAMPLE_LABELS = {
     "hello": "Hello Console",
@@ -162,6 +196,7 @@ EXAMPLE_LABELS = {
     "catch": "Catch the Star",
     "draw": "Pen Spiral",
     "tone": "Tone Practice",
+    "night": "Night Scene",
 }
 
 

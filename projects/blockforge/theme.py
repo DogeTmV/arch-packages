@@ -154,11 +154,6 @@ def stylesheet():
         border-radius: 7px;
         padding: 4px;
     }}
-    QPlainTextEdit#sourceView {{
-        font-family: "JetBrains Mono", "Fira Code", monospace;
-        font-size: 11px;
-        line-height: 18px;
-    }}
     QPlainTextEdit#buildView {{
         font-family: "JetBrains Mono", "Fira Code", monospace;
         font-size: 11px;

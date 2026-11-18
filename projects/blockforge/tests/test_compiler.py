@@ -9,6 +9,7 @@ import unittest
 from compiler import ValidationError, build_command, generate_source
 from core import Procedure, Project, Sprite, Variable, block, validate_project
 from examples import example_project
+from images import encode_rgba_png
 
 
 def _run(command, **kwargs):
@@ -428,6 +429,48 @@ class NativeParityTests(unittest.TestCase):
                 source = generate_source(self._project(), language)
                 self.assertIn("0.45", source)
                 self.assertIn("10", source)
+
+
+class StageScriptTests(unittest.TestCase):
+    def test_a_stage_script_runs_without_a_spirit(self):
+        project = Project(
+            name="Stage Only", width=160, height=160,
+            scripts=[{
+                "target": "stage", "x": 24, "y": 24,
+                "blocks": [block("event_flag"),
+                           block("control_print", value='"stage ready"'),
+                           block("control_stop", choice="all")],
+            }],
+        )
+        for language in ("cpp", "rust"):
+            with self.subTest(language=language):
+                result = _compile_and_run(project, language)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("stage ready", result.stdout)
+
+    def test_embedded_pictures_compile_into_standalone_programs(self):
+        picture = encode_rgba_png(2, 2, bytes([200, 30, 40, 255] * 4))
+        backdrop = encode_rgba_png(2, 2, bytes([10, 20, 30, 255] * 4))
+        project = Project(
+            name="Pictures", width=160, height=160,
+            backdrop="backdrop.png",
+            sprites=[Sprite(name="Hero", image="hero.png")],
+            assets={"hero.png": picture, "backdrop.png": backdrop},
+            scripts=[{
+                "target": "stage", "x": 0, "y": 0,
+                "blocks": [block("event_flag"),
+                           block("looks_set_backdrop", backdrop="backdrop.png"),
+                           block("control_stop", choice="all")],
+            }],
+        )
+        for language in ("cpp", "rust"):
+            with self.subTest(language=language):
+                source = generate_source(project, language)
+                self.assertIn("add_image", source)
+                self.assertIn("set_backdrop", source)
+                self.assertIn("200, 30, 40, 255", source)
+                result = _compile_and_run(project, language)
+                self.assertEqual(result.returncode, 0, result.stderr)
 
 
 if __name__ == "__main__":

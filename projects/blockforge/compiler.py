@@ -6,6 +6,7 @@ No Qt, Python, or blockforge installation is needed to run them.
 """
 
 from expressions import ExprContext, translate_expression
+from images import ImageError, decode_png
 from runtime_cpp import SOURCE as CPP_RUNTIME
 from runtime_rust import SOURCE as RUST_RUNTIME
 
@@ -89,6 +90,51 @@ def _costume(sprite):
     """Match the preview's costume clamp in generated initial state."""
     count = max(1, int(sprite.costume_count))
     return max(1, min(count, int(sprite.costume)))
+
+
+def _asset_symbol(name, index):
+    """Return a safe source identifier for an asset name."""
+    cleaned = "".join(char if char.isalnum() else "_" for char in name)
+    return "BF_ASSET_%d_%s" % (index, cleaned)
+
+
+def _asset_data(project):
+    """Decode every PNG asset once and return generation metadata."""
+    decoded = []
+    for index, (name, payload) in enumerate(sorted(project.assets.items())):
+        try:
+            width, height, rgba = decode_png(payload)
+        except ImageError as exc:
+            from core import ValidationError
+            raise ValidationError("asset %r: %s" % (name, exc)) from exc
+        decoded.append((name, width, height, rgba, _asset_symbol(name, index)))
+    return decoded
+
+
+def _byte_literals(data, per_line=20):
+    # Long byte arrays are easier to review when wrapped into readable rows.
+    return ",\n    ".join(
+        ", ".join(str(byte) for byte in data[start:start + per_line])
+        for start in range(0, len(data), per_line)
+    )
+
+
+def _cpp_asset_definitions(assets):
+    lines = ["// Embedded RGBA pictures from the .bfproj save file."]
+    for name, width, height, rgba, symbol in assets:
+        lines.append("static const Uint8 %s[] = {" % symbol)
+        lines.append("    " + _byte_literals(rgba) + ",")
+        lines.append("};")
+    return "\n".join(lines)
+
+
+def _rust_asset_definitions(assets):
+    lines = ["// Embedded RGBA pictures from the .bfproj save file."]
+    for name, width, height, rgba, symbol in assets:
+        lines.append("static %s: &[u8] = &[" % symbol)
+        lines.append("    " + _byte_literals(rgba) + ",")
+        lines.append("];")
+    return "\n".join(lines)
 
 
 def _context(project, sprite, params=None, locals_=None):
@@ -210,6 +256,9 @@ class _Generator:
         if kind == "looks_set_background":
             return [call("set_background", _color_value(
                 fields.get("color", "#151a26"), self.language))]
+        if kind == "looks_set_backdrop":
+            return [call("set_backdrop", _color_value(
+                fields.get("backdrop", ""), self.language))]
         if kind == "sound_tone":
             return [call("tone", number("freq"), number("secs"))]
         if kind == "sound_stop":
@@ -315,7 +364,8 @@ class _Generator:
     def script_function(self, index, script):
         hat = script["blocks"][0]
         name = "script_%d" % index
-        sprite = self.sprite_names.index(script["sprite"])
+        sprite = (self.sprite_names.index(script["sprite"])
+                  if script.get("target") != "stage" else 0)
         body = self.blocks(script["blocks"][1:], sprite)
         reset = ("    bf_reset_script();" if self.cpp
                  else "    bf_reset_script();")
@@ -394,6 +444,7 @@ class _Generator:
         return [signature] + self.blocks(procedure.blocks, "sprite", 1, locals_) + ["}"]
 
     def cpp_main(self):
+        assets = _asset_data(self.project)
         lines = [
             "int main(int argc, char** argv) {",
             "    (void)argc; (void)argv;",
@@ -405,6 +456,12 @@ class _Generator:
                 self.project.width, self.project.height,
                 _literal(self.project.background, "cpp")),
         ]
+        for name, width, height, rgba, symbol in assets:
+            lines.append("    app.add_image(%s, %d, %d, %s, %d);" % (
+                _literal(name, "cpp"), width, height, symbol, len(rgba)))
+        if self.project.backdrop:
+            lines.append("    app.set_backdrop(%s);" % _literal(
+                self.project.backdrop, "cpp"))
         for index, sprite in enumerate(self.project.sprites):
             lines += [
                 "    {",
@@ -416,6 +473,7 @@ class _Generator:
                 "        item.direction = %s;" % _number(sprite.direction, "cpp"),
                 "        item.shape = %s;" % _literal(sprite.shape, "cpp"),
                 "        item.color = %s;" % _literal(sprite.color, "cpp"),
+                "        item.image = %s;" % _literal(sprite.image, "cpp"),
                 "        item.costume = %d;" % _costume(sprite),
                 "        item.costume_count = %d;" % int(sprite.costume_count),
                 "        item.layer = %d;" % int(sprite.layer),
@@ -467,6 +525,7 @@ class _Generator:
             "        if (thread.joinable()) thread.join();",
             "    }",
             "    app.close_audio();",
+            "    app.clear_textures();",
             "    SDL_DestroyRenderer(renderer);",
             "    SDL_DestroyWindow(window);",
             "    SDL_Quit();",
@@ -476,6 +535,7 @@ class _Generator:
         return lines
 
     def rust_main(self):
+        assets = _asset_data(self.project)
         lines = [
             "fn main() {",
             "    unsafe {",
@@ -487,6 +547,14 @@ class _Generator:
             '    let app: SharedApp = Arc::new(Mutex::new(App::new(%d, %d, %s)));'
             % (self.project.width, self.project.height,
                _name_literal(self.project.background, "rust")),
+        ]
+        for name, width, height, rgba, symbol in assets:
+            lines.append("    app.lock().unwrap().add_image(%s, %d, %d, %s);" % (
+                _name_literal(name, "rust"), width, height, symbol))
+        if self.project.backdrop:
+            lines.append("    app.lock().unwrap().set_backdrop(%s);" %
+                         _color_value(self.project.backdrop, "rust"))
+        lines += [
             "    {",
             "        let mut state = app.lock().unwrap();",
         ]
@@ -499,6 +567,7 @@ class _Generator:
                 "        item.direction = %s;" % _number_literal(sprite.direction, "rust"),
                 "        item.shape = %s;" % _literal(sprite.shape, "rust"),
                 "        item.color = %s;" % _literal(sprite.color, "rust"),
+                "        item.image = %s;" % _literal(sprite.image, "rust"),
                 "        item.costume = %d;" % _costume(sprite),
                 "        item.costume_count = %d;" % int(sprite.costume_count),
                 "        item.layer = %d;" % int(sprite.layer),
@@ -577,6 +646,7 @@ class _Generator:
             "    for handle in threads { let _ = handle.join(); }",
             "    app.lock().unwrap().close_audio();",
             "    unsafe {",
+            "        app.lock().unwrap().clear_textures();",
             "        SDL_DestroyRenderer(renderer);",
             "        SDL_DestroyWindow(window);",
             "        SDL_Quit();",
@@ -591,6 +661,10 @@ class _Generator:
             parts = [_CPP_HEADER.format(name=_escape(self.project.name)), CPP_RUNTIME]
         else:
             parts = [_RUST_HEADER.format(name=_escape(self.project.name)), RUST_RUNTIME]
+        assets = _asset_data(self.project)
+        if assets:
+            parts.append(_cpp_asset_definitions(assets) if self.cpp
+                         else _rust_asset_definitions(assets))
         for procedure in self.project.procedures:
             parts.append("\n".join(self.procedure_function(procedure)))
         for index, script in enumerate(self.project.scripts):

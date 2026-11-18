@@ -158,6 +158,11 @@ struct BfLine {
     int size;
 };
 
+struct BfImage {
+    int width = 0, height = 0;
+    std::vector<Uint8> rgba;
+};
+
 struct BfSprite {
     std::string name;
     double x = 0, y = 0, size = 100, direction = 90;
@@ -165,6 +170,7 @@ struct BfSprite {
     int costume = 1, costume_count = 2, layer = 0;
     std::string shape = "circle";
     std::string color = "#4c9ffe";
+    std::string image;
     Uint32 say_until = 0;
     std::string say_text;
 };
@@ -195,8 +201,11 @@ class App {
 public:
     int width, height;
     std::string background = "#151a26";
+    std::string backdrop;
     std::vector<BfSprite> sprites;
     std::vector<BfLine> lines;
+    std::unordered_map<std::string, BfImage> images;
+    std::unordered_map<std::string, SDL_Texture*> textures;
     std::unordered_map<std::string, Value> vars;
     std::mutex mutex;
     std::atomic<bool> running{true};
@@ -219,6 +228,48 @@ public:
     BfSprite& sprite(int index) {
         if (sprites.empty()) sprites.push_back(BfSprite());
         return sprites[(std::size_t)index % sprites.size()];
+    }
+
+    void add_image(const std::string& id, int image_width, int image_height,
+                   const Uint8* pixels, std::size_t length) {
+        BfImage image;
+        image.width = image_width;
+        image.height = image_height;
+        image.rgba.assign(pixels, pixels + length);
+        images[id] = std::move(image);
+    }
+
+    void set_background(const std::string& color) {
+        background = color;
+        backdrop.clear();
+    }
+
+    void set_backdrop(const std::string& id) {
+        backdrop = id;
+    }
+
+    SDL_Texture* texture_for(SDL_Renderer* renderer, const std::string& id) {
+        if (id.empty()) return nullptr;
+        auto cached = textures.find(id);
+        if (cached != textures.end()) return cached->second;
+        auto found = images.find(id);
+        if (found == images.end()) return nullptr;
+        const BfImage& image = found->second;
+        SDL_Texture* texture = SDL_CreateTexture(
+            renderer, SDL_PIXELFORMAT_RGBA8888, SDL_TEXTUREACCESS_STATIC,
+            image.width, image.height);
+        if (!texture) return nullptr;
+        SDL_SetTextureBlendMode(texture, SDL_BLENDMODE_BLEND);
+        SDL_UpdateTexture(texture, nullptr, image.rgba.data(), image.width * 4);
+        textures[id] = texture;
+        return texture;
+    }
+
+    void clear_textures() {
+        for (auto& item : textures) {
+            if (item.second) SDL_DestroyTexture(item.second);
+        }
+        textures.clear();
     }
 
     double num(const Value& value) const { return value.as_num(); }
@@ -473,6 +524,11 @@ public:
     void set_background(const Value& color) {
         std::lock_guard<std::mutex> guard(mutex);
         background = color.as_text();
+        backdrop.clear();
+    }
+    void set_backdrop(const Value& id) {
+        std::lock_guard<std::mutex> guard(mutex);
+        backdrop = id.as_text();
     }
     void print_line(const Value& value) {
         bf_print_text(value.as_text());
@@ -551,6 +607,10 @@ public:
         auto bg = bf_color(background);
         SDL_SetRenderDrawColor(renderer, bg[0], bg[1], bg[2], 255);
         SDL_RenderClear(renderer);
+        if (SDL_Texture* backdrop_texture = texture_for(renderer, backdrop)) {
+            SDL_Rect stage{0, 0, width, height};
+            SDL_RenderCopy(renderer, backdrop_texture, nullptr, &stage);
+        }
         for (const BfLine& line : lines) {
             SDL_SetRenderDrawColor(renderer, line.color[0], line.color[1],
                                    line.color[2], 255);
@@ -578,7 +638,13 @@ public:
                 std::swap(color[0], color[1]);
                 std::swap(color[1], color[2]);
             }
-            draw_shape(renderer, item, cx, cy, size, color);
+            if (SDL_Texture* texture = texture_for(renderer, item.image)) {
+                SDL_Rect box{cx - size / 2, cy - size / 2, size, size};
+                SDL_RenderCopyEx(renderer, texture, nullptr, &box,
+                                 90.0 - item.direction, nullptr, SDL_FLIP_NONE);
+            } else {
+                draw_shape(renderer, item, cx, cy, size, color);
+            }
             if (item.say_until > SDL_GetTicks()) {
                 SDL_SetRenderDrawColor(renderer, 245, 247, 252, 255);
                 SDL_Rect bubble{cx - 34, cy - size - 26, 68, 20};

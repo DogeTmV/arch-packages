@@ -1,7 +1,7 @@
 # Maintainer: DogeTmV
 pkgname=blockforge
 pkgver=0.1.0
-pkgrel=2
+pkgrel=3
 pkgdesc='Scratch-inspired visual block editor that generates standalone C++17 and Rust SDL2 programs'
 arch=('x86_64' 'aarch64')
 url='https://github.com/DogeTmV/arch-packages'
@@ -16,8 +16,8 @@ sha256sums=('SKIP')
 package() {
   cd "$pkgname"
   install -Dm755 "$pkgname" "$pkgdir/usr/bin/$pkgname"
-  for module in compiler core editing examples expressions gui preview \
-                runtime_cpp runtime_rust theme; do
+  for module in compiler core editing examples expressions gui images library \
+                preview runtime_cpp runtime_rust theme; do
     install -Dm644 "$module.py" "$pkgdir/usr/lib/$pkgname/$module.py"
   done
   install -Dm644 "$pkgname.desktop" "$pkgdir/usr/share/applications/$pkgname.desktop"

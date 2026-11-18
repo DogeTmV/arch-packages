@@ -35,6 +35,10 @@ const SDL_RENDERER_SOFTWARE: u32 = 0x00000001;
 const SDL_RENDERER_ACCELERATED: u32 = 0x00000002;
 const SDL_QUIT: u32 = 0x00000100;
 const AUDIO_S16SYS: u16 = 0x8010;
+const SDL_PIXELFORMAT_RGBA8888: u32 = 0x16462004;
+const SDL_TEXTUREACCESS_STATIC: i32 = 0;
+const SDL_BLENDMODE_BLEND: i32 = 0x00000001;
+const SDL_FLIP_NONE: i32 = 0;
 
 #[repr(C)]
 struct BfRect { x: i32, y: i32, w: i32, h: i32 }
@@ -67,6 +71,17 @@ extern "C" {
     fn SDL_RenderFillRect(renderer: *mut c_void, rect: *const BfRect) -> i32;
     fn SDL_RenderDrawRect(renderer: *mut c_void, rect: *const BfRect) -> i32;
     fn SDL_RenderDrawLine(renderer: *mut c_void, x1: i32, y1: i32, x2: i32, y2: i32) -> i32;
+    fn SDL_CreateTexture(renderer: *mut c_void, format: u32, access: i32,
+                         width: i32, height: i32) -> *mut c_void;
+    fn SDL_DestroyTexture(texture: *mut c_void);
+    fn SDL_UpdateTexture(texture: *mut c_void, rect: *const BfRect,
+                         pixels: *const c_void, pitch: i32) -> i32;
+    fn SDL_SetTextureBlendMode(texture: *mut c_void, mode: i32) -> i32;
+    fn SDL_RenderCopy(renderer: *mut c_void, texture: *mut c_void,
+                      source: *const BfRect, target: *const BfRect) -> i32;
+    fn SDL_RenderCopyEx(renderer: *mut c_void, texture: *mut c_void,
+                        source: *const BfRect, target: *const BfRect,
+                        angle: f64, center: *const c_void, flip: i32) -> i32;
     fn SDL_RenderPresent(renderer: *mut c_void);
     fn SDL_Delay(ms: u32);
     fn SDL_GetTicks() -> u32;
@@ -233,6 +248,13 @@ struct BfLine {
 }
 
 #[derive(Clone)]
+struct BfImage {
+    width: i32,
+    height: i32,
+    rgba: Vec<u8>,
+}
+
+#[derive(Clone)]
 struct BfSprite {
     name: String,
     x: f64, y: f64, size: f64, direction: f64,
@@ -240,6 +262,7 @@ struct BfSprite {
     costume: usize, costume_count: usize, layer: i32,
     shape: String,
     color: String,
+    image: String,
     say_until: u32,
     say_text: String,
 }
@@ -250,7 +273,7 @@ impl BfSprite {
             name: name.to_string(), x: 0.0, y: 0.0, size: 100.0,
             direction: 90.0, visible: true, costume: 1, costume_count: 2,
             layer: 0, shape: "circle".to_string(), color: "#4c9ffe".to_string(),
-            say_until: 0, say_text: String::new(),
+            image: String::new(), say_until: 0, say_text: String::new(),
         }
     }
 }
@@ -277,9 +300,12 @@ struct App {
     width: i32,
     height: i32,
     background: String,
+    backdrop: String,
     sprites: Vec<BfSprite>,
     vars: HashMap<String, Value>,
     lines: Vec<BfLine>,
+    images: HashMap<String, BfImage>,
+    textures: HashMap<String, usize>,
     keys: [bool; 256],
     pointer_x: f64,
     pointer_y: f64,
@@ -297,7 +323,9 @@ impl App {
         let tick = bf_ticks();
         App {
             width, height, background: background.to_string(),
-            sprites: Vec::new(), vars: HashMap::new(), lines: Vec::new(),
+            backdrop: String::new(), sprites: Vec::new(),
+            vars: HashMap::new(), lines: Vec::new(),
+            images: HashMap::new(), textures: HashMap::new(),
             keys: [false; 256], pointer_x: 0.0, pointer_y: 0.0,
             started: tick, rng_state: ((tick as u64) << 16) | 0x2545f491,
             audio_device: 0, pen_active: false, pen_color: (74, 222, 128),
@@ -310,6 +338,34 @@ impl App {
         }
         let slot = index % self.sprites.len();
         &mut self.sprites[slot]
+    }
+    fn add_image(&mut self, id: &str, width: i32, height: i32,
+                 pixels: &[u8]) {
+        self.images.insert(id.to_string(), BfImage {
+            width, height, rgba: pixels.to_vec(),
+        });
+    }
+    unsafe fn texture_for(&mut self, renderer: *mut c_void,
+                          id: &str) -> Option<*mut c_void> {
+        if id.is_empty() { return None; }
+        if let Some(texture) = self.textures.get(id) {
+            return Some(*texture as *mut c_void);
+        }
+        let image = self.images.get(id)?.clone();
+        let texture = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_RGBA8888,
+            SDL_TEXTUREACCESS_STATIC, image.width, image.height);
+        if texture.is_null() { return None; }
+        SDL_SetTextureBlendMode(texture, SDL_BLENDMODE_BLEND);
+        SDL_UpdateTexture(texture, ptr::null(), image.rgba.as_ptr() as *const c_void,
+                          image.width * 4);
+        self.textures.insert(id.to_string(), texture as usize);
+        Some(texture)
+    }
+    unsafe fn clear_textures(&mut self) {
+        for texture in self.textures.values() {
+            SDL_DestroyTexture(*texture as *mut c_void);
+        }
+        self.textures.clear();
     }
     fn num(&self, value: Value) -> f64 { value.as_num() }
     fn text(&self, value: Value) -> String { value.as_text() }
@@ -472,7 +528,13 @@ impl App {
         item.say_until = bf_ticks() + (seconds.max(0.0) * 1000.0) as u32;
         bf_print_text(&text);
     }
-    fn set_background(&mut self, color: Value) { self.background = color.as_text(); }
+    fn set_background(&mut self, color: Value) {
+        self.background = color.as_text();
+        self.backdrop.clear();
+    }
+    fn set_backdrop(&mut self, id: Value) {
+        self.backdrop = id.as_text();
+    }
     fn tone(&self, frequency: f64, seconds: f64) {
         let state = AUDIO.get_or_init(|| Mutex::new(AudioState { freq: 0.0, left: 0.0, phase: 0.0 }));
         {
@@ -533,6 +595,12 @@ impl App {
             SDL_SetRenderDrawColor(renderer, bg.0, bg.1, bg.2, 255);
             SDL_RenderClear(renderer);
         }
+        let backdrop_id = self.backdrop.clone();
+        let backdrop_texture = unsafe { self.texture_for(renderer, &backdrop_id) };
+        if let Some(texture) = backdrop_texture {
+            let stage = BfRect { x: 0, y: 0, w: self.width, h: self.height };
+            unsafe { SDL_RenderCopy(renderer, texture, ptr::null(), &stage); }
+        }
         for line in &self.lines {
             let color = line.color;
             unsafe { SDL_SetRenderDrawColor(renderer, color.0, color.1, color.2, 255); }
@@ -559,30 +627,42 @@ impl App {
             for _ in 1..item.costume {
                 let swap = color.0; color.0 = color.1; color.1 = color.2; color.2 = swap;
             }
-            unsafe {
-                SDL_SetRenderDrawColor(renderer, color.0, color.1, color.2, 255);
-                if item.shape == "rect" {
-                    let rect = BfRect { x: cx - size / 2, y: cy - size / 2, w: size, h: size };
-                    SDL_RenderFillRect(renderer, &rect);
-                } else if item.shape == "triangle" {
-                    let half = size / 2;
-                    for dy in -half..=half {
-                        let ratio = (dy + half) as f64 / size as f64;
-                        let row_half = (ratio * size as f64 / 2.0) as i32;
-                        let rect = BfRect { x: cx - row_half, y: cy + dy,
-                                            w: row_half * 2, h: 1 };
+            let texture = unsafe { self.texture_for(renderer, &item.image) };
+            if let Some(texture) = texture {
+                let box_rect = BfRect { x: cx - size / 2, y: cy - size / 2,
+                                        w: size, h: size };
+                unsafe {
+                    SDL_RenderCopyEx(renderer, texture, ptr::null(), &box_rect,
+                                     90.0 - item.direction, ptr::null(), SDL_FLIP_NONE);
+                }
+            } else {
+                unsafe {
+                    SDL_SetRenderDrawColor(renderer, color.0, color.1, color.2, 255);
+                    if item.shape == "rect" {
+                        let rect = BfRect { x: cx - size / 2, y: cy - size / 2, w: size, h: size };
                         SDL_RenderFillRect(renderer, &rect);
-                    }
-                } else if item.shape == "star" {
-                    bf_draw_star(renderer, cx, cy, size);
-                } else {
-                    let radius = (size / 2).max(1);
-                    for dy in -radius..=radius {
-                        let dx = ((radius * radius - dy * dy) as f64).sqrt() as i32;
-                        let rect = BfRect { x: cx - dx, y: cy + dy, w: dx * 2, h: 1 };
-                        SDL_RenderFillRect(renderer, &rect);
+                    } else if item.shape == "triangle" {
+                        let half = size / 2;
+                        for dy in -half..=half {
+                            let ratio = (dy + half) as f64 / size as f64;
+                            let row_half = (ratio * size as f64 / 2.0) as i32;
+                            let rect = BfRect { x: cx - row_half, y: cy + dy,
+                                                w: row_half * 2, h: 1 };
+                            SDL_RenderFillRect(renderer, &rect);
+                        }
+                    } else if item.shape == "star" {
+                        bf_draw_star(renderer, cx, cy, size);
+                    } else {
+                        let radius = (size / 2).max(1);
+                        for dy in -radius..=radius {
+                            let dx = ((radius * radius - dy * dy) as f64).sqrt() as i32;
+                            let rect = BfRect { x: cx - dx, y: cy + dy, w: dx * 2, h: 1 };
+                            SDL_RenderFillRect(renderer, &rect);
+                        }
                     }
                 }
+            }
+            unsafe {
                 if item.say_until > now {
                     let bubble = BfRect { x: cx - 34, y: cy - size - 26, w: 68, h: 20 };
                     SDL_RenderDrawRect(renderer, &bubble);
@@ -652,6 +732,7 @@ trait AppExt {
     fn next_costume(&self, index: usize);
     fn say(&self, index: usize, message: Value, seconds: f64);
     fn set_background(&self, color: Value);
+    fn set_backdrop(&self, id: Value);
     fn print_line(&self, value: Value);
     fn tone(&self, frequency: f64, seconds: f64);
     fn stop_tones(&self);
@@ -764,6 +845,7 @@ impl AppExt for SharedApp {
     fn next_costume(&self, index: usize) { self.lock().unwrap().next_costume(index); }
     fn say(&self, index: usize, message: Value, seconds: f64) { self.lock().unwrap().say(index, message, seconds); }
     fn set_background(&self, color: Value) { self.lock().unwrap().set_background(color); }
+    fn set_backdrop(&self, id: Value) { self.lock().unwrap().set_backdrop(id); }
     fn print_line(&self, value: Value) { bf_print_text(&value.as_text()); }
     fn tone(&self, frequency: f64, seconds: f64) {
         let state = AUDIO.get_or_init(|| {

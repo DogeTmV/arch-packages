@@ -11,13 +11,15 @@ def _project():
         name="Editing",
         sprites=[Sprite("Hero"), Sprite("Ball")],
         scripts=[
-            {"sprite": "Hero", "x": 32, "y": 32, "blocks": [
-                block("event_flag"),
-                block("control_repeat", times="2", children={"SUB": []}),
-            ]},
-            {"sprite": "Ball", "x": 32, "y": 32, "blocks": [
-                block("event_flag"),
-            ]},
+            {"target": "spirit", "sprite": "Hero", "x": 32, "y": 32,
+             "blocks": [
+                 block("event_flag"),
+                 block("control_repeat", times="2", children={"SUB": []}),
+             ]},
+            {"target": "spirit", "sprite": "Ball", "x": 32, "y": 32,
+             "blocks": [
+                 block("event_flag"),
+             ]},
         ],
     )
 

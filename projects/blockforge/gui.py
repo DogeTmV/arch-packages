@@ -1,9 +1,10 @@
 """PySide6 editor for blockforge.
 
-The editor is intentionally a real IDE rather than a demo: projects can be
-edited, saved, previewed on the stage, compiled to C++ or Rust, and launched as
-standalone SDL2 programs.  All build/run work uses argument lists and QProcess;
-no shell is involved.
+A friendly, Scratch-like editor for small C++ and Rust programs. Spirits and
+the stage have their own script spaces, blocks are grouped into readable
+categories, and source code is only generated when a project is built or
+exported. All build/run work uses argument lists and QProcess; no shell is
+involved.
 """
 
 import argparse
@@ -17,13 +18,13 @@ import sys
 import tempfile
 
 from PySide6.QtCore import (
-    QEvent, QRectF, Qt, QTimer, QPoint, QRegularExpression, QSize, QProcess,
-    QProcessEnvironment, Signal,
+    QEvent, QRectF, Qt, QTimer, QPoint, QMimeData, QRegularExpression, QSize,
+    QProcess, QProcessEnvironment, Signal,
 )
 from PySide6.QtGui import (
-    QAction, QBrush, QColor, QDoubleValidator, QDrag, QFontMetrics, QIntValidator,
-    QKeySequence, QPainter, QPainterPath, QPen, QPixmap,
-    QRegularExpressionValidator, QTextCursor,
+    QAction, QBrush, QColor, QDoubleValidator, QDrag, QFont, QFontMetrics,
+    QImage, QIntValidator, QKeySequence, QPainter, QPainterPath, QPen,
+    QPixmap, QRegularExpressionValidator, QTextCursor,
 )
 from PySide6.QtWidgets import (
     QApplication, QColorDialog, QComboBox, QDialog, QDialogButtonBox, QFileDialog,
@@ -36,15 +37,36 @@ from PySide6.QtWidgets import (
 import theme
 from compiler import ValidationError, build_command, generate_source
 from core import (
-    BLOCKS, CATEGORIES, FieldDef, Procedure, Project, Sprite, Variable,
-    argument_default, block, load_project, save_project, validate_project,
+    BLOCKS, CATEGORIES, STAGE_NAME, FieldDef, Procedure, Project, Sprite,
+    Variable, argument_default, block, load_project, save_project,
+    script_owner, script_target, scripts_for_target, validate_project,
 )
+from core import new_script as core_new_script
 from editing import blocks_at, container, insert_block, move_block, remove_block
 from examples import EXAMPLE_LABELS, EXAMPLES, example_project
+from images import encode_rgba_png
+from library import (
+    SPIRITS, STAGES, apply_stage_preset, spirit_from_preset, spirit_start_script,
+    stage_asset_name,
+)
 from preview import PreviewEngine
 
 PALETTE_MIME = "blockforge:palette:"
 MOVE_MIME = "blockforge:move:"
+PROJECT_FILTER = "Blockforge project (*.bfproj)"
+
+# The palette is deliberately ordered for reading, not by internal category key.
+PALETTE_ORDER = (
+    "motion", "looks", "sound", "sensing", "control", "variables", "pen",
+    "custom", "events", "operators",
+)
+
+# Mirrors core.validate_project's stage restrictions so the editor never offers
+# a block that cannot be compiled for the stage.
+STAGE_FORBIDDEN_TYPES = frozenset({
+    "looks_say", "looks_show", "looks_hide", "looks_set_size",
+    "looks_change_size", "looks_set_costume", "looks_next_costume",
+})
 
 # Reporters insert expressions, so the palette must supply a valid default
 # rather than the human-readable template (which mentions undefined names).
@@ -76,6 +98,15 @@ REPORTER_DEFAULTS = {
     "operator_length": 'len("text")',
 }
 
+# A few compact readability tweaks on top of the shared dark stylesheet.
+_EDITOR_STYLE = """
+QListWidget { font-size: 13px; }
+QLabel#hint { font-size: 11px; color: #aab6cf; }
+QPushButton { font-size: 13px; }
+QTabWidget#consolePanel { background: #151b2b; }
+QToolTip { font-size: 12px; }
+"""
+
 
 def heading_endpoint(x, y, degrees, length):
     """Return the stage-space end of a Scratch-style heading indicator."""
@@ -93,22 +124,64 @@ def _category_color(block_type, fallback=None):
                                 fallback or theme.DARK["accent"])
 
 
-def _template_label(definition):
-    text = definition.template
+def _template_label(definition, fields=None):
+    """Return a short, human-readable label for a block definition.
+
+    ``label`` is preferred over the compiler-facing template. Placeholders are
+    shown as a small square in the palette and replaced with real values inside
+    the workspace, so blocks read like "move 10 steps" or "if score > 2 then".
+    """
+    text = definition.label or definition.template or definition.type
     for field in definition.fields:
-        text = text.replace("{%s}" % field.name, "▭")
+        placeholder = "□"
+        if fields and field.name in fields:
+            placeholder = str(fields[field.name])
+        text = text.replace("{%s}" % field.name, placeholder)
     return text.replace("{", "").replace("}", "")
+
+
+def _allowed_for_target(definition, target):
+    """Return whether a block can be used by the selected script target."""
+    if definition is None or target != STAGE_NAME:
+        return True
+    return not (definition.category in ("motion", "pen") or
+                definition.type in STAGE_FORBIDDEN_TYPES)
+
+
+def _new_target_script(target, hat_type="event_flag", x=32, y=32):
+    """Create a script for a spirit name or ``"Stage"`` using core's helper.
+
+    ``core.new_script`` validates the *kind* of target, so spirit-owned scripts
+    are created with the spirit kind and then assigned their owner.
+    """
+    try:
+        return core_new_script(target, hat_type, x, y)
+    except ValueError:
+        # The current core helper only accepts a target *kind* for spirits.
+        script = core_new_script("spirit", hat_type, x, y)
+        script["sprite"] = target
+        return script
 
 
 class PaletteDelegate(QStyledItemDelegate):
     """Paint palette entries as rounded, category-colored puzzle pieces."""
 
     def paint(self, painter, option, index):
+        if index.data(Qt.UserRole + 2) == "section":
+            painter.save()
+            painter.setPen(QColor(theme.DARK["muted"]))
+            font = painter.font()
+            font.setBold(True)
+            painter.setFont(font)
+            painter.drawText(option.rect.adjusted(8, 0, -4, 0),
+                             Qt.AlignVCenter, index.data(Qt.DisplayRole) or "")
+            painter.restore()
+            return
         color = QColor(index.data(Qt.UserRole + 1) or theme.DARK["accent"])
         rect = option.rect.adjusted(3, 2, -3, -2)
         painter.save()
         painter.setRenderHint(QPainter.Antialiasing)
-        background = theme.shade(color, -0.62)
+        background = theme.shade(color, -0.68)
         painter.setPen(QPen(color, 1.2))
         painter.setBrush(QBrush(background))
         painter.drawRoundedRect(rect, 9, 9)
@@ -117,11 +190,13 @@ class PaletteDelegate(QStyledItemDelegate):
         painter.setPen(QColor(theme.DARK["text"]))
         metrics = QFontMetrics(painter.font())
         text = metrics.elidedText(index.data(Qt.DisplayRole) or "",
-                                 Qt.ElideRight, rect.width() - 24)
+                                  Qt.ElideRight, rect.width() - 24)
         painter.drawText(rect.adjusted(14, 0, -8, 0), Qt.AlignVCenter, text)
         painter.restore()
 
     def sizeHint(self, option, index):
+        if index.data(Qt.UserRole + 2) == "section":
+            return QSize(10, 26)
         return QSize(10, 34)
 
 
@@ -131,13 +206,13 @@ class PaletteList(QListWidget):
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
             item = self.itemAt(event.position().toPoint())
-            if item is not None:
+            if item is not None and item.data(Qt.UserRole):
                 self.setCurrentItem(item)
         super().mousePressEvent(event)
 
     def startDrag(self, supported_actions):
         item = self.currentItem()
-        if item is None:
+        if item is None or not item.data(Qt.UserRole):
             return
         drag = QDrag(self)
         drag.setMimeData(BlockPalette._mime(
@@ -149,20 +224,24 @@ class PaletteList(QListWidget):
 
 
 class BlockPalette(QWidget):
-    """Category tabs and draggable block previews."""
+    """Sectioned, searchable list of draggable blocks."""
 
     blockRequested = Signal(str)
 
-    def __init__(self, project):
-        super().__init__()
+    def __init__(self, project, target=None, parent=None):
+        super().__init__(parent)
         self.project = project
+        self.target = target or (
+            project.sprites[0].name if project.sprites else STAGE_NAME
+        )
+        self.sprite = self.target  # compatibility with older callers
         self.active_category = None
         self.setObjectName("palettePanel")
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(12, 12, 12, 12)
-        layout.setSpacing(9)
-
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(7)
         layout.addWidget(self._label("Blocks", "sectionTitle"))
+
         self.search = QLineEdit()
         self.search.setPlaceholderText("Search blocks…")
         self.search.setObjectName("blockSearch")
@@ -170,7 +249,7 @@ class BlockPalette(QWidget):
         layout.addWidget(self.search)
 
         grid = QGridLayout()
-        grid.setSpacing(5)
+        grid.setSpacing(4)
         all_button = QToolButton()
         all_button.setText("All")
         all_button.setObjectName("category_all")
@@ -178,7 +257,13 @@ class BlockPalette(QWidget):
         all_button.setChecked(True)
         all_button.clicked.connect(lambda: self.set_category(None))
         grid.addWidget(all_button, 0, 0)
-        for index, category in enumerate(CATEGORIES):
+        self.category_buttons = {"all": all_button}
+        ordered = sorted(
+            CATEGORIES,
+            key=lambda item: (PALETTE_ORDER.index(item.key)
+                              if item.key in PALETTE_ORDER else 99),
+        )
+        for index, category in enumerate(ordered):
             button = QToolButton()
             button.setText(category.name)
             button.setObjectName("category_%s" % category.key)
@@ -188,10 +273,7 @@ class BlockPalette(QWidget):
                 lambda checked, key=category.key: self.set_category(key)
             )
             grid.addWidget(button, (index + 1) // 3, (index + 1) % 3)
-        self.category_buttons = [all_button] + [
-            self.findChild(QToolButton, "category_%s" % item.key)
-            for item in CATEGORIES
-        ]
+            self.category_buttons[category.key] = button
         layout.addLayout(grid)
 
         self.palette_list = PaletteList()
@@ -199,12 +281,11 @@ class BlockPalette(QWidget):
         self.palette_list.setItemDelegate(PaletteDelegate())
         self.palette_list.setDragEnabled(True)
         self.palette_list.setDefaultDropAction(Qt.CopyAction)
-        self.palette_list.itemActivated.connect(
-            lambda item: self.blockRequested.emit(item.data(Qt.UserRole))
-        )
+        self.palette_list.itemActivated.connect(self._item_activated)
         layout.addWidget(self.palette_list, 1)
         layout.addWidget(self._label(
-            "Drag a block into the workspace, or double-click to add it.", "hint"
+            "Drag a block into the workspace, or double-click to add it.",
+            "hint",
         ))
         self._refresh_list()
 
@@ -215,50 +296,78 @@ class BlockPalette(QWidget):
         label.setWordWrap(True)
         return label
 
+    def _item_activated(self, item):
+        block_type = item.data(Qt.UserRole)
+        if block_type:
+            self.blockRequested.emit(block_type)
+
     def set_category(self, key):
         self.active_category = key
-        for button in self.category_buttons:
-            if button is None:
-                continue
-            name = button.objectName()
-            expected = "category_all" if key is None else "category_%s" % key
-            button.setChecked(name == expected)
+        expected = "category_all" if key is None else "category_%s" % key
+        for name, button in self.category_buttons.items():
+            if button is not None:
+                button.setChecked(name == expected)
+        self._refresh_list()
+
+    def set_target(self, name):
+        """Hide blocks that cannot run on the selected spirit or stage."""
+        self.target = name or STAGE_NAME
+        self.sprite = self.target
         self._refresh_list()
 
     def _refresh_list(self):
         query = self.search.text().strip().lower()
         self.palette_list.clear()
-        for definition in BLOCKS.values():
-            if self.active_category and definition.category != self.active_category:
+        for key in PALETTE_ORDER:
+            category = next((item for item in CATEGORIES if item.key == key), None)
+            if category is None or (self.active_category and
+                                    self.active_category != key):
                 continue
-            label = _template_label(definition)
-            if query and query not in label.lower() and \
-                    query not in definition.type.lower():
+            entries = []
+            for definition in BLOCKS.values():
+                if definition.category != key or \
+                        not _allowed_for_target(definition, self.target):
+                    continue
+                label = _template_label(definition)
+                if query and query not in label.lower() and \
+                        query not in definition.template.lower() and \
+                        query not in definition.type.lower():
+                    continue
+                entries.append((definition, label))
+            if not entries:
                 continue
-            item = QListWidgetItem(label)
-            item.setData(Qt.UserRole, definition.type)
-            item.setData(Qt.UserRole + 1,
-                         theme.category_color(definition.category))
-            item.setToolTip(definition.help or label)
-            self.palette_list.addItem(item)
+            header = QListWidgetItem(category.name)
+            header.setData(Qt.UserRole + 2, "section")
+            header.setFlags(Qt.ItemIsEnabled)
+            font = header.font()
+            font.setBold(True)
+            header.setFont(font)
+            header.setForeground(QColor(theme.DARK["muted"]))
+            self.palette_list.addItem(header)
+            for definition, label in entries:
+                item = QListWidgetItem(label)
+                item.setData(Qt.UserRole, definition.type)
+                item.setData(Qt.UserRole + 1,
+                             theme.category_color(definition.category))
+                item.setToolTip(definition.help or label)
+                self.palette_list.addItem(item)
 
     @staticmethod
     def _mime(text):
-        from PySide6.QtCore import QMimeData
         mime = QMimeData()
         mime.setText(text)
         return mime
 
     @staticmethod
     def _drag_pixmap(item):
-        pixmap = QPixmap(220, 30)
+        pixmap = QPixmap(240, 32)
         pixmap.fill(Qt.transparent)
         painter = QPainter(pixmap)
         painter.setRenderHint(QPainter.Antialiasing)
         color = QColor(item.data(Qt.UserRole + 1))
-        painter.setBrush(theme.shade(color, -0.55))
+        painter.setBrush(theme.shade(color, -0.6))
         painter.setPen(QPen(color, 1.5))
-        painter.drawRoundedRect(0, 1, 219, 27, 8, 8)
+        painter.drawRoundedRect(0, 1, 239, 29, 8, 8)
         painter.setPen(QColor(theme.DARK["text"]))
         painter.drawText(pixmap.rect().adjusted(10, 0, -6, 0),
                          Qt.AlignVCenter, item.text())
@@ -396,16 +505,19 @@ class ProcedureDialog(QDialog):
 
 
 class SpriteDialog(QDialog):
-    """Edit every persisted property of a sprite."""
+    """Edit every persisted property of a spirit, including its picture."""
 
-    def __init__(self, sprite=None, names=(), parent=None):
+    def __init__(self, sprite=None, names=(), parent=None, assets=None):
         super().__init__(parent)
-        self.setWindowTitle("Sprite properties")
+        self.setWindowTitle("Spirit properties")
         self.original_name = sprite.name if sprite else None
         self.names = set(names)
         if self.original_name:
             self.names.discard(self.original_name)
         sprite = sprite or Sprite()
+        # Shared with the project so imported pictures are saved with it.
+        self.assets = assets if assets is not None else {}
+        self._picture_name = sprite.image or ""
         layout = QFormLayout(self)
         self.fields = {}
         self.fields["name"] = QLineEdit(sprite.name)
@@ -420,7 +532,7 @@ class SpriteDialog(QDialog):
             self.fields[key] = field
             layout.addRow(label, field)
         for key, label in (("costume", "Costume"),
-                           ("costume_count", "Costume count"),
+                           ("costume_count", "Costumes"),
                            ("layer", "Layer")):
             field = QLineEdit(str(getattr(sprite, key)))
             field.setObjectName("sprite_%s" % key)
@@ -443,7 +555,88 @@ class SpriteDialog(QDialog):
         visible.setCurrentText("yes" if sprite.visible else "no")
         self.fields["visible"] = visible
         layout.addRow("Visible", visible)
+
+        picture_row = QHBoxLayout()
+        self.picture_preview = QLabel()
+        self.picture_preview.setObjectName("picturePreview")
+        self.picture_preview.setFixedSize(96, 72)
+        self.picture_preview.setAlignment(Qt.AlignCenter)
+        self.picture_preview.setStyleSheet(
+            "background: %s; border: 1px solid %s; border-radius: 6px;"
+            % (theme.DARK["stage"], theme.DARK["border"])
+        )
+        picture_row.addWidget(self.picture_preview)
+        picture_buttons = QVBoxLayout()
+        choose = QPushButton("Choose picture…")
+        choose.setObjectName("choosePicture")
+        choose.clicked.connect(self._choose_picture)
+        clear = QPushButton("Clear picture")
+        clear.setObjectName("clearPicture")
+        clear.clicked.connect(self._clear_picture)
+        picture_buttons.addWidget(choose)
+        picture_buttons.addWidget(clear)
+        picture_row.addLayout(picture_buttons)
+        layout.addRow("Picture", picture_row)
+        self._show_preview()
         layout.addRow(_dialog_buttons(self))
+
+    def _show_preview(self):
+        data = self.assets.get(self._picture_name) if self._picture_name else None
+        image = QImage.fromData(data) if data else QImage()
+        if image.isNull():
+            self.picture_preview.clear()
+            self.picture_preview.setText("no picture")
+            return
+        pixmap = QPixmap.fromImage(image).scaled(
+            self.picture_preview.size(), Qt.KeepAspectRatio,
+            Qt.SmoothTransformation)
+        self.picture_preview.setPixmap(pixmap)
+
+    def _clear_picture(self):
+        self._picture_name = ""
+        self._show_preview()
+
+    def _choose_picture(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Choose a spirit picture", "",
+            "Images (*.png *.jpg *.jpeg *.bmp *.gif)",
+        )
+        if not path:
+            return
+        image = QImage(path)
+        if image.isNull():
+            QMessageBox.warning(self, "Spirit picture",
+                                "That picture could not be opened.")
+            return
+        if max(image.width(), image.height()) > 512:
+            image = image.scaled(512, 512, Qt.KeepAspectRatio,
+                                 Qt.SmoothTransformation)
+        image = image.convertToFormat(QImage.Format.Format_RGBA8888)
+        pointer = image.bits()
+        try:
+            pointer.setsize(image.sizeInBytes())
+        except AttributeError:
+            pass
+        rgba = bytes(pointer)
+        if len(rgba) != image.width() * image.height() * 4:
+            QMessageBox.warning(self, "Spirit picture",
+                                "That picture could not be converted.")
+            return
+        stem = re.sub(r"[^A-Za-z0-9_-]+", "-", Path(path).stem).strip("-")[:40]
+        base = stem or "spirit"
+        name = base + ".png"
+        index = 2
+        while name in self.assets:
+            name = "%s-%d.png" % (base, index)
+            index += 1
+        try:
+            self.assets[name] = encode_rgba_png(
+                image.width(), image.height(), rgba)
+        except ValueError as error:
+            QMessageBox.warning(self, "Spirit picture", str(error))
+            return
+        self._picture_name = name
+        self._show_preview()
 
     def sprite(self):
         def number(key, default=0.0):
@@ -468,14 +661,122 @@ class SpriteDialog(QDialog):
             shape=self.fields["shape"].currentText(),
             color=self.fields["color"].text(),
             visible=self.fields["visible"].currentText() == "yes",
+            image=self._picture_name,
         )
 
     def accept(self):
         if self.sprite().name in self.names:
-            QMessageBox.warning(self, "Sprite properties",
-                                "That sprite name is already used.")
+            QMessageBox.warning(self, "Spirit properties",
+                                "That spirit name is already used.")
             return
         super().accept()
+
+
+# Both names are kept: "spirit" is the user-facing word, "SpriteDialog" the
+# historical class name used by existing callers and tests.
+SpiritDialog = SpriteDialog
+
+
+class StageDialog(QDialog):
+    """Choose a built-in stage backdrop or a plain background color."""
+
+    def __init__(self, project=None, parent=None):
+        if isinstance(project, QWidget) and parent is None:
+            parent, project = project, None
+        super().__init__(parent)
+        self.project = project
+        self.setWindowTitle("Choose a stage look")
+        layout = QFormLayout(self)
+        self.preset_combo = QComboBox()
+        self.preset_combo.setObjectName("stagePreset")
+        self.preset_combo.addItem("Plain color", None)
+        for preset in STAGES:
+            self.preset_combo.addItem(preset.label, preset.key)
+        if project is not None:
+            current_key = next((preset.key for preset in STAGES
+                                if stage_asset_name(preset.key) ==
+                                project.backdrop), None)
+            if current_key:
+                self.preset_combo.setCurrentText(
+                    next(p.label for p in STAGES if p.key == current_key))
+        self.stage_combo = self.preset_combo
+        self.backdrop_combo = self.preset_combo
+        layout.addRow("Backdrop", self.preset_combo)
+
+        self.description = QLabel()
+        self.description.setObjectName("hint")
+        self.description.setWordWrap(True)
+        layout.addRow(self.description)
+        self.color = ColorField(project.background if project is not None
+                                else theme.DARK["stage"])
+        self.color.setObjectName("stageColor")
+        layout.addRow("Plain color", self.color)
+        self.preset_combo.currentIndexChanged.connect(self._update_description)
+        self._update_description()
+        layout.addRow(_dialog_buttons(self))
+
+    def _update_description(self):
+        key = self.preset_combo.currentData()
+        preset = next((item for item in STAGES if item.key == key), None)
+        self.description.setText(preset.description if preset else
+                                 "Use a solid stage color with no picture.")
+
+    def values(self):
+        return self.preset_combo.currentData(), self.color.text()
+
+    def apply(self, project):
+        key, color = self.values()
+        if key:
+            apply_stage_preset(project, key, project.width, project.height)
+        else:
+            project.background = color
+            project.backdrop = ""
+        return project
+
+
+class LibraryDialog(QDialog):
+    """Browse spirits and stage looks included with blockforge."""
+
+    def __init__(self, project=None, parent=None):
+        if isinstance(project, QWidget) and parent is None:
+            parent, project = project, None
+        super().__init__(parent)
+        self.project = project
+        self.setWindowTitle("Library")
+        layout = QVBoxLayout(self)
+        self.list = QListWidget()
+        self.list.setObjectName("libraryList")
+        self.list.setMinimumSize(360, 320)
+        for title in ("Spirits", "Stages"):
+            header = QListWidgetItem(title)
+            header.setData(Qt.UserRole + 2, "section")
+            font = header.font()
+            font.setBold(True)
+            header.setFont(font)
+            header.setForeground(QColor(theme.DARK["text"]))
+            self.list.addItem(header)
+            presets = SPIRITS if title == "Spirits" else STAGES
+            for preset in presets:
+                item = QListWidgetItem("%s — %s" % (preset.label,
+                                                    preset.description))
+                item.setData(Qt.UserRole, ("stage" if title == "Stages"
+                                           else "spirit", preset.key))
+                item.setToolTip(preset.description)
+                self.list.addItem(item)
+        self.list.itemDoubleClicked.connect(lambda: self.accept())
+        first = next((row for row in range(self.list.count())
+                      if self.list.item(row).data(Qt.UserRole)), None)
+        if first is not None:
+            self.list.setCurrentRow(first)
+        layout.addWidget(self.list)
+        layout.addWidget(_dialog_buttons(self))
+
+    def selected(self):
+        item = self.list.currentItem()
+        if item is None:
+            return None
+        value = item.data(Qt.UserRole)
+        return value if isinstance(value, tuple) else None
 
 
 class VariableDialog(QDialog):
@@ -572,22 +873,22 @@ class BlockWidget(QFrame):
         self.setStyleSheet(
             "QFrame#block_%s { background: %s; border: 1px solid %s;"
             "border-left: 5px solid %s; border-radius: 8px; margin: 2px; }"
-            % (item.type, _hex(theme.shade(color, -0.70)), _hex(theme.shade(color, -0.3)),
-               _hex(color))
+            % (item.type, _hex(theme.shade(color, -0.74)),
+               _hex(theme.shade(color, -0.32)), _hex(color))
         )
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(9, 6, 9, 7)
         layout.setSpacing(5)
         header_row = QHBoxLayout()
-        header = QLabel(_template_label(self.definition))
+        header = QLabel(_template_label(self.definition, self.item.fields))
         header.setStyleSheet("color: %s; font-weight: 700;" % _hex(color))
         header.setWordWrap(True)
         header_row.addWidget(header, 1)
         if not self.definition.hat:
             remove = QToolButton()
             remove.setText("✕")
-            remove.setToolTip("Delete this block")
+            remove.setToolTip("Remove this block")
             remove.setObjectName("deleteBlock")
             remove.clicked.connect(lambda: self.workspace.delete_block(
                 self.script_index, self.path, self.index
@@ -641,21 +942,33 @@ class BlockWidget(QFrame):
             )
         elif field.kind == "target":
             editor = QComboBox()
-            editor.addItems(["mouse"] + [s.name for s in self.workspace.project.sprites])
+            editor.addItems(["mouse"] + [
+                spirit.name for spirit in self.workspace.project.sprites
+            ])
             editor.setCurrentText(str(value))
             editor.currentTextChanged.connect(
                 lambda text, name=field.name: self._set_field(name, text)
             )
         elif field.kind == "variable":
             editor = QComboBox()
-            editor.addItems([v.name for v in self.workspace.project.variables])
+            editor.addItems([item.name for item in self.workspace.project.variables])
             editor.setCurrentText(str(value))
             editor.currentTextChanged.connect(
                 lambda text, name=field.name: self._set_field(name, text)
             )
         elif field.kind == "procedure":
             editor = QComboBox()
-            editor.addItems([p.name for p in self.workspace.project.procedures])
+            editor.addItems([item.name for item in self.workspace.project.procedures])
+            editor.setCurrentText(str(value))
+            editor.currentTextChanged.connect(
+                lambda text, name=field.name: self._set_field(name, text)
+            )
+        elif field.kind == "backdrop":
+            editor = QComboBox()
+            names = [""] + sorted(self.workspace.project.assets)
+            if value and value not in names:
+                names.append(str(value))
+            editor.addItems(names)
             editor.setCurrentText(str(value))
             editor.currentTextChanged.connect(
                 lambda text, name=field.name: self._set_field(name, text)
@@ -733,7 +1046,7 @@ class SlotWidget(QFrame):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(8, 5, 8, 6)
         layout.setSpacing(3)
-        label = QLabel("%s" % name.title())
+        label = QLabel(name.title())
         label.setObjectName("hint")
         layout.addWidget(label)
         items = container(workspace.project, script_index, path)
@@ -771,7 +1084,7 @@ class SlotWidget(QFrame):
 
 
 class ScriptWidget(QFrame):
-    """A complete top-level script with a hat block."""
+    """A complete top-level script belonging to the selected target."""
 
     deleteRequested = Signal(int)
 
@@ -779,7 +1092,6 @@ class ScriptWidget(QFrame):
         super().__init__()
         self.workspace = workspace
         self.script_index = script_index
-        script = workspace.project.scripts[script_index]
         self.setObjectName("scriptFrame")
         self.setStyleSheet(
             "QFrame#scriptFrame { background: %s; border: 1px solid %s;"
@@ -792,19 +1104,15 @@ class ScriptWidget(QFrame):
         layout.setSpacing(5)
 
         header = QHBoxLayout()
-        title = QLabel("Script %d" % (script_index + 1))
+        script = workspace.project.scripts[script_index]
+        label = "%s · %s" % (script_owner(script), "script")
+        title = QLabel(label)
         title.setObjectName("sectionTitle")
         header.addWidget(title)
-        sprite = QComboBox()
-        sprite.addItems([item.name for item in workspace.project.sprites])
-        sprite.setCurrentText(script["sprite"])
-        sprite.currentTextChanged.connect(
-            lambda text, index=script_index: self._set_sprite(index, text)
-        )
-        header.addWidget(sprite, 1)
+        header.addStretch(1)
         remove = QToolButton()
         remove.setText("✕")
-        remove.setToolTip("Delete script")
+        remove.setToolTip("Remove script")
         remove.clicked.connect(lambda: self.deleteRequested.emit(script_index))
         header.addWidget(remove)
         layout.addLayout(header)
@@ -816,10 +1124,6 @@ class ScriptWidget(QFrame):
         empty.setAlignment(Qt.AlignCenter)
         empty.setMinimumHeight(46)
         layout.addWidget(empty)
-
-    def _set_sprite(self, index, name):
-        self.workspace.project.scripts[index]["sprite"] = name
-        self.workspace.projectChanged.emit()
 
     def dragEnterEvent(self, event):
         if self.workspace.accepts(event):
@@ -868,14 +1172,14 @@ class ProcedureBodyWidget(QFrame):
         title = QLabel("define %s(%s)" % (procedure.name, parameters))
         title.setObjectName("sectionTitle")
         layout.addWidget(title)
-        hint = QLabel("This is the body of your custom block.")
+        hint = QLabel("These blocks run whenever you use this My Block.")
         hint.setObjectName("hint")
         layout.addWidget(hint)
         layout.addWidget(SlotWidget("SUB", workspace, -1 - index, (), procedure))
 
 
 class Workspace(QScrollArea):
-    """Scrollable canvas for sprite scripts and custom-block definitions."""
+    """Scrollable canvas for the selected spirit's or the stage's scripts."""
 
     projectChanged = Signal()
     structureChanged = Signal()
@@ -884,7 +1188,9 @@ class Workspace(QScrollArea):
     def __init__(self, project):
         super().__init__()
         self.project = project
-        self.current_sprite = project.sprites[0].name if project.sprites else ""
+        self.current_target = (project.sprites[0].name if project.sprites
+                               else STAGE_NAME)
+        self.current_sprite = self.current_target  # compatibility alias
         self.current_procedure = None
         self.focused_field = None
         self.setObjectName("workspacePanel")
@@ -916,20 +1222,29 @@ class Workspace(QScrollArea):
 
     def set_project(self, project):
         self.project = project
-        self.current_sprite = project.sprites[0].name if project.sprites else ""
+        self.current_target = (project.sprites[0].name if project.sprites
+                               else STAGE_NAME)
+        self.current_sprite = self.current_target
         self.current_procedure = None
         self.focused_field = None
         self.rebuild()
 
-    def set_current_sprite(self, name):
-        if self.current_sprite == name:
+    def set_current_target(self, name):
+        name = name or STAGE_NAME
+        if self.current_target == name and not self.current_procedure:
             return
+        # Picking a spirit or the stage always returns to its scripts.
+        self.current_target = name
         self.current_sprite = name
-        if not self.current_procedure:
-            self.rebuild()
+        self.current_procedure = None
+        self.rebuild()
+
+    def set_current_sprite(self, name):
+        """Compatibility alias: a spirit name or ``"Stage"``."""
+        self.set_current_target(name)
 
     def target_names(self):
-        return ["Sprite scripts"] + [
+        return ["Scripts"] + [
             "My Block: %s" % procedure.name
             for procedure in self.project.procedures
         ]
@@ -937,7 +1252,7 @@ class Workspace(QScrollArea):
     def target_text(self):
         if self.current_procedure:
             return "My Block: %s" % self.current_procedure
-        return "Sprite scripts"
+        return "Scripts"
 
     def set_target(self, text):
         name = text[len("My Block: "):] if text.startswith("My Block: ") else None
@@ -967,17 +1282,15 @@ class Workspace(QScrollArea):
                     ProcedureBodyWidget(self, index),
                 )
         if not self.current_procedure:
-            visible = [(index, script)
-                       for index, script in enumerate(self.project.scripts)
-                       if script["sprite"] == self.current_sprite]
+            visible = scripts_for_target(self.project, self.current_target)
             for index, _ in visible:
                 script_widget = ScriptWidget(self, index)
                 script_widget.deleteRequested.connect(self.delete_script)
                 self.layout.insertWidget(self.layout.count() - 1, script_widget)
             if not visible:
                 label = QLabel(
-                    "No scripts for %s yet. Drag a green flag here or press "
-                    "New script." % (self.current_sprite or "this sprite")
+                    "No scripts for %s yet. Drag a green flag here or choose "
+                    "New script." % self.current_target
                 )
                 label.setObjectName("hint")
                 label.setWordWrap(True)
@@ -1001,7 +1314,7 @@ class Workspace(QScrollArea):
                           int(payload["index"]))
                 item = self._item_at(source)
                 return ("move", source, item)
-            except (ValueError, TypeError, KeyError, IndexError):
+            except (ValueError, TypeError, KeyError, IndexError, AttributeError):
                 return None
         return None
 
@@ -1029,12 +1342,13 @@ class Workspace(QScrollArea):
         kind = payload[0]
         definition = payload[2] if kind == "palette" else \
             BLOCKS.get(payload[2].type)
-        if definition is None:
+        if definition is None or not _allowed_for_target(definition,
+                                                         self.current_target):
             return False
         if definition.hat:
             return ((not path) and
                     (script_index is None or script_index >= 0)) and \
-                not self.current_procedure
+                   not self.current_procedure
         if kind == "move" and script_index is not None:
             target = (script_index, path, index)
             return self._valid_move(payload[1], target)
@@ -1066,11 +1380,8 @@ class Workspace(QScrollArea):
             return
         index = self._current_script_index()
         if index is None:
-            name = self._ensure_sprite()
-            self.project.scripts.append({
-                "sprite": name, "x": 32, "y": 32,
-                "blocks": [block("event_flag")],
-            })
+            self.project.scripts.append(_new_target_script(
+                self._ensure_target(), "event_flag"))
             index = len(self.project.scripts) - 1
         if self.handle_drop(mime, index, (), len(
                 self.project.scripts[index]["blocks"])):
@@ -1084,20 +1395,24 @@ class Workspace(QScrollArea):
         kind = payload[0]
         if kind == "palette":
             type_, definition = payload[1], payload[2]
+            if not _allowed_for_target(definition, self.current_target):
+                return False
             if definition.hat:
                 if path or script_index is None or script_index < 0:
                     return False
                 return self.new_script(type_)
             if self.current_procedure:
-                script_index = -1 - self.project.procedures.index(
-                    next(item for item in self.project.procedures
-                         if item.name == self.current_procedure)
-                )
+                procedure = next(item for item in self.project.procedures
+                                 if item.name == self.current_procedure)
+                script_index = -1 - self.project.procedures.index(procedure)
                 index = len(blocks_at(self.project, script_index))
             insert_block(self.project, script_index, path, index, type_)
         else:
             source = payload[1]
             if BLOCKS[payload[2].type].hat and (path or self.current_procedure):
+                return False
+            if not _allowed_for_target(BLOCKS[payload[2].type],
+                                       self.current_target):
                 return False
             target = (script_index, path, index)
             if not self._valid_move(source, target):
@@ -1115,19 +1430,27 @@ class Workspace(QScrollArea):
         self.structureChanged.emit()
 
     # --- editing commands ------------------------------------------------------
-    def _ensure_sprite(self):
+    def _ensure_target(self):
+        """Return a valid target name for newly created scripts."""
+        if self.current_target == STAGE_NAME:
+            return STAGE_NAME
         if not self.project.sprites:
-            self.project.sprites.append(Sprite(name="Sprite"))
-        if not any(item.name == self.current_sprite
+            self.current_target = STAGE_NAME
+            self.current_sprite = STAGE_NAME
+            return STAGE_NAME
+        if not any(item.name == self.current_target
                    for item in self.project.sprites):
-            self.current_sprite = self.project.sprites[0].name
-        return self.current_sprite
+            self.current_target = self.project.sprites[0].name
+            self.current_sprite = self.current_target
+        return self.current_target
+
+    def _ensure_sprite(self):
+        target = self._ensure_target()
+        return "" if target == STAGE_NAME else target
 
     def _current_script_index(self):
-        self._ensure_sprite()
-        for index, script in enumerate(self.project.scripts):
-            if script["sprite"] == self.current_sprite:
-                return index
+        for index, _ in scripts_for_target(self.project, self._ensure_target()):
+            return index
         return None
 
     def new_script(self, hat_type="event_flag"):
@@ -1135,12 +1458,10 @@ class Workspace(QScrollArea):
         if definition is None or not definition.hat:
             return False
         if self.current_procedure:
-            self.error.emit("Event blocks belong in sprite scripts, not My Blocks.")
+            self.error.emit("Event blocks belong in scripts, not My Blocks.")
             return False
-        name = self._ensure_sprite()
-        self.project.scripts.append({
-            "sprite": name, "x": 32, "y": 32, "blocks": [block(hat_type)],
-        })
+        self.project.scripts.append(
+            _new_target_script(self._ensure_target(), hat_type))
         self._structure_changed()
         return True
 
@@ -1166,6 +1487,9 @@ class Workspace(QScrollArea):
             except RuntimeError:
                 pass
             return
+        if not _allowed_for_target(definition, self.current_target):
+            self.error.emit("That block cannot run on %s." % self.current_target)
+            return
         if definition.hat:
             self.new_script(type_)
             return
@@ -1178,10 +1502,8 @@ class Workspace(QScrollArea):
             return
         index = self._current_script_index()
         if index is None:
-            self.project.scripts.append({
-                "sprite": self.current_sprite, "x": 32, "y": 32,
-                "blocks": [block("event_flag")],
-            })
+            self.project.scripts.append(_new_target_script(
+                self._ensure_target(), "event_flag"))
             index = len(self.project.scripts) - 1
         insert_block(self.project, index, (),
                      len(self.project.scripts[index]["blocks"]), type_)
@@ -1266,7 +1588,7 @@ class StageWidget(QWidget):
 
     @staticmethod
     def _draw_sprite(painter, shape, x, y, size):
-        """Draw one of the four built-in sprite shapes."""
+        """Draw one of the four built-in spirit shapes."""
         radius = size / 2.0
         path = QPainterPath()
         if shape == "circle" or shape not in ("rect", "triangle", "star"):
@@ -1291,6 +1613,26 @@ class StageWidget(QWidget):
             path.closeSubpath()
         painter.drawPath(path)
 
+    @staticmethod
+    def _pixmap(name, engine):
+        """Build a QPixmap from an embedded RGBA picture, if available."""
+        if not name:
+            return None
+        entry = getattr(engine, "images", {}).get(name)
+        if not entry:
+            return None
+        width, height, rgba = entry
+        if width <= 0 or height <= 0 or not rgba:
+            return None
+        try:
+            image = QImage(bytes(rgba), width, height,
+                           QImage.Format.Format_RGBA8888)
+            if image.isNull():
+                return None
+            return QPixmap.fromImage(image.copy())
+        except (TypeError, ValueError):
+            return None
+
     def paintEvent(self, event):
         painter = QPainter(self)
         try:
@@ -1304,11 +1646,17 @@ class StageWidget(QWidget):
             painter.fillRect(int(offset_x), int(offset_y),
                              int(width * scale), int(height * scale),
                              QColor(self.engine.background))
-            painter.setPen(QPen(QColor(theme.DARK["border"]), 1))
+            backdrop = self._pixmap(getattr(self.engine, "backdrop", ""),
+                                    self.engine)
+            if backdrop is not None:
+                # Embedded stage pictures are drawn first, under the faint grid.
+                painter.drawPixmap(int(offset_x), int(offset_y),
+                                   int(width * scale), int(height * scale),
+                                   backdrop)
+            painter.setPen(QPen(QColor(255, 255, 255, 16), 1))
             painter.drawRect(int(offset_x), int(offset_y),
                              int(width * scale), int(height * scale))
-
-            painter.setPen(QPen(QColor(255, 255, 255, 18), 1))
+            painter.setPen(QPen(QColor(255, 255, 255, 14), 1))
             for x in range(0, width + 1, 40):
                 painter.drawLine(int(offset_x + x * scale), int(offset_y),
                                  int(offset_x + x * scale),
@@ -1330,39 +1678,46 @@ class StageWidget(QWidget):
                 )
 
             now = self.engine.elapsed
-            for sprite in sorted(
+            for spirit in sorted(
                     self.engine.sprites,
                     key=lambda item: (item.get("layer", 0), item["name"])):
-                if not sprite["visible"]:
+                if not spirit["visible"]:
                     continue
-                x = offset_x + (width / 2 + sprite["x"]) * scale
-                y = offset_y + (height / 2 - sprite["y"]) * scale
-                size = max(6, sprite["size"] / 100 * 36 * scale)
-                color = QColor(sprite["color"])
-                for _ in range(1, sprite["costume"]):
-                    red, green, blue = color.red(), color.green(), color.blue()
-                    color = QColor(green, blue, red)
-                painter.setBrush(QBrush(color))
-                painter.setPen(QPen(color.lighter(140), 1.5))
-                self._draw_sprite(painter, sprite["shape"], x, y, size)
+                x = offset_x + (width / 2 + spirit["x"]) * scale
+                y = offset_y + (height / 2 - spirit["y"]) * scale
+                size = max(6, spirit["size"] / 100 * 36 * scale)
+                picture = self._pixmap(spirit.get("image", ""), self.engine)
+                if picture is not None:
+                    target = QRectF(x - size / 2, y - size / 2, size, size)
+                    painter.drawPixmap(
+                        target, picture,
+                        QRectF(0, 0, picture.width(), picture.height()))
+                else:
+                    color = QColor(spirit["color"])
+                    for _ in range(1, spirit["costume"]):
+                        red, green, blue = color.red(), color.green(), color.blue()
+                        color = QColor(green, blue, red)
+                    painter.setBrush(QBrush(color))
+                    painter.setPen(QPen(color.lighter(140), 1.5))
+                    self._draw_sprite(painter, spirit["shape"], x, y, size)
                 end_x, end_y = heading_endpoint(
-                    x, y, sprite["direction"], size * 0.45
+                    x, y, spirit["direction"], size * 0.45
                 )
                 painter.setPen(QPen(QColor(theme.DARK["text"]), 1))
                 painter.drawLine(x, y, end_x, end_y)
-                if sprite["say_until"] > now:
+                if spirit["say_until"] > now:
                     rect = QRectF(int(x - 42), int(y - size - 34), 84, 24)
                     painter.setBrush(QBrush(QColor(theme.DARK["panel_alt"])))
                     painter.setPen(QPen(QColor(theme.DARK["text"]), 1))
                     painter.drawRoundedRect(rect, 7, 7)
                     painter.drawText(rect, Qt.AlignCenter,
-                                     sprite["say_text"][:22])
+                                     spirit["say_text"][:22])
         finally:
             painter.end()
 
 
 class MainWindow(QMainWindow):
-    """The blockforge editor window."""
+    """The Scratch-like blockforge editor window."""
 
     def __init__(self, project=None, language=None, path=None):
         super().__init__()
@@ -1374,14 +1729,15 @@ class MainWindow(QMainWindow):
         self.project_path = path
         self.dirty = False
         self.setWindowTitle("blockforge — %s" % self.project.name)
-        self.setMinimumSize(1180, 760)
-        self.resize(1480, 940)
-        self.setStyleSheet(theme.stylesheet())
+        self.setMinimumSize(1120, 700)
+        self.resize(1440, 900)
+        self.setStyleSheet(theme.stylesheet() + _EDITOR_STYLE)
         self._temp_dir = None
         self._output_cursor = 0
         self.binary_path = None
         self.build_process = None
         self.run_process = None
+        self.export_binary_action = None
         self.engine = PreviewEngine(self.project)
         self._timer = QTimer(self)
         self._timer.setInterval(33)
@@ -1392,7 +1748,8 @@ class MainWindow(QMainWindow):
         self._connect_signals()
         self.refresh_source()
         self._refresh_lists()
-        self.statusBar().showMessage("Ready — drag blocks from the left, or open an example.")
+        self.statusBar().showMessage(
+            "Ready — drag blocks into the workspace, or open an example.")
 
     # --- construction ---------------------------------------------------------
     def _build_toolbar(self):
@@ -1404,17 +1761,30 @@ class MainWindow(QMainWindow):
         self.title_label = QLabel(self.project.name)
         self.title_label.setObjectName("projectTitle")
         toolbar.addWidget(self.title_label)
-
         toolbar.addSeparator()
+
         self._action(toolbar, "new", "New", self.new_project, "Ctrl+N")
         self._action(toolbar, "open", "Open", self.open_project, "Ctrl+O")
         self._action(toolbar, "save", "Save", self.save_project, "Ctrl+S")
-        self._action(toolbar, "save", "Save as", self.save_project_as)
-        self._action(toolbar, "export", "Export source", self.export_source)
-        self.export_binary_action = self._action(
-            toolbar, "export", "Save binary", self.export_binary)
-        self.export_binary_action.setEnabled(False)
-        self._action(toolbar, "settings", "Settings", self.edit_settings)
+        self._action(toolbar, "export", "Export folder", self.export_source)
+        toolbar.addSeparator()
+        build = self._action(toolbar, "build", "Build", self.build_project,
+                             "Ctrl+B")
+        build.setObjectName("buildButton")
+        self.run_button = self._action(toolbar, "run", "Run", self.run_binary,
+                                       "F5")
+        self.run_button.setEnabled(False)
+        self._action(toolbar, "stop", "Stop", self.stop_all)
+        toolbar.addSeparator()
+
+        toolbar.addWidget(QLabel("Language"))
+        self.language_combo = QComboBox()
+        self.language_combo.setObjectName("languageCombo")
+        self.language_combo.addItems(["C++", "Rust"])
+        self.language_combo.setCurrentText(
+            "Rust" if self.language == "rust" else "C++")
+        toolbar.addWidget(self.language_combo)
+
         examples = QToolButton()
         examples.setText("Examples")
         examples.setIcon(theme.icon("examples"))
@@ -1426,27 +1796,12 @@ class MainWindow(QMainWindow):
         examples.setMenu(menu)
         examples.setPopupMode(QToolButton.InstantPopup)
         toolbar.addWidget(examples)
-
-        toolbar.addSeparator()
-        self.language_combo = QComboBox()
-        self.language_combo.setObjectName("languageCombo")
-        self.language_combo.addItems(["C++", "Rust"])
-        self.language_combo.setCurrentText(
-            "Rust" if self.language == "rust" else "C++")
-        toolbar.addWidget(QLabel("Target"))
-        toolbar.addWidget(self.language_combo)
-
-        toolbar.addSeparator()
-        build = self._action(toolbar, "build", "Build", self.build_project, "Ctrl+B")
-        build.setObjectName("buildButton")
-        self.run_button = self._action(toolbar, "run", "Run", self.run_binary, "F5")
-        self.run_button.setEnabled(False)
-        self._action(toolbar, "stop", "Stop", self.stop_all)
+        self._action(toolbar, "settings", "Settings", self.edit_settings)
 
         spacer = QWidget()
         spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         toolbar.addWidget(spacer)
-        status = QLabel("C++17 + SDL2")
+        status = QLabel("SDL2")
         status.setObjectName("statusLabel")
         toolbar.addWidget(status)
 
@@ -1460,9 +1815,10 @@ class MainWindow(QMainWindow):
         return action
 
     def _build_body(self):
-        self.palette = BlockPalette(self.project)
+        self.palette = BlockPalette(self.project, self.workspace_target_name())
         self.palette_list = self.palette.palette_list
         self.workspace = Workspace(self.project)
+        self.workspace.set_current_target(self.palette.target)
 
         center = QFrame()
         center.setObjectName("panel")
@@ -1470,7 +1826,7 @@ class MainWindow(QMainWindow):
         center_layout.setContentsMargins(12, 12, 12, 12)
         center_layout.setSpacing(8)
         workspace_header = QHBoxLayout()
-        title = QLabel("Workspace")
+        title = QLabel("Scripts")
         title.setObjectName("sectionTitle")
         workspace_header.addWidget(title)
         workspace_header.addStretch(1)
@@ -1478,7 +1834,7 @@ class MainWindow(QMainWindow):
         self.editor_target = QComboBox()
         self.editor_target.setObjectName("editorTarget")
         workspace_header.addWidget(self.editor_target)
-        new_script = QPushButton("+ Script")
+        new_script = QPushButton("+ New script")
         new_script.setObjectName("newScriptButton")
         new_script.clicked.connect(lambda: self.workspace.new_script())
         workspace_header.addWidget(new_script)
@@ -1489,7 +1845,31 @@ class MainWindow(QMainWindow):
         right.setObjectName("panel")
         right_layout = QVBoxLayout(right)
         right_layout.setContentsMargins(12, 12, 12, 12)
-        right_layout.setSpacing(8)
+        right_layout.setSpacing(7)
+        right_layout.addWidget(self._label("Spirits and stage", "sectionTitle"))
+        self.sprite_list = QListWidget()
+        self.sprite_list.setObjectName("spriteList")
+        self.sprite_list.setMaximumHeight(150)
+        right_layout.addWidget(self.sprite_list)
+        spirit_row = QHBoxLayout()
+        add_spirit = QPushButton("+ Spirit")
+        add_spirit.setObjectName("addSpiritButton")
+        add_spirit.clicked.connect(self.add_sprite)
+        edit_spirit = QPushButton("Edit")
+        edit_spirit.setObjectName("editSpriteButton")
+        edit_spirit.clicked.connect(self.edit_sprite)
+        remove_spirit = QPushButton("Remove")
+        remove_spirit.setObjectName("dangerButton")
+        remove_spirit.clicked.connect(self.remove_sprite)
+        spirit_row.addWidget(add_spirit)
+        spirit_row.addWidget(edit_spirit)
+        spirit_row.addWidget(remove_spirit)
+        right_layout.addLayout(spirit_row)
+        library_button = QPushButton("Open library")
+        library_button.setObjectName("libraryButton")
+        library_button.clicked.connect(self.add_from_library)
+        right_layout.addWidget(library_button)
+
         right_layout.addWidget(self._label("Stage", "sectionTitle"))
         stage_frame = QFrame()
         stage_frame.setObjectName("stageFrame")
@@ -1498,40 +1878,21 @@ class MainWindow(QMainWindow):
         self.stage = StageWidget(self.project, self.engine)
         stage_layout.addWidget(self.stage)
         right_layout.addWidget(stage_frame, 3)
-
         preview_row = QHBoxLayout()
         self.preview_button = QPushButton("Preview")
         self.preview_button.setObjectName("primaryButton")
         self.preview_button.clicked.connect(self.toggle_preview)
         preview_row.addWidget(self.preview_button)
-        self.stage_button = QPushButton("Stage color")
-        self.stage_button.clicked.connect(self.choose_background)
-        preview_row.addWidget(self.stage_button)
+        stage_button = QPushButton("Stage look")
+        stage_button.setObjectName("stageLookButton")
+        stage_button.clicked.connect(self.choose_background)
+        preview_row.addWidget(stage_button)
         right_layout.addLayout(preview_row)
-
-        right_layout.addWidget(self._label("Sprites", "sectionTitle"))
-        self.sprite_list = QListWidget()
-        self.sprite_list.setObjectName("spriteList")
-        self.sprite_list.setMaximumHeight(130)
-        right_layout.addWidget(self.sprite_list)
-        sprite_row = QHBoxLayout()
-        add_sprite = QPushButton("+ Sprite")
-        add_sprite.clicked.connect(self.add_sprite)
-        edit_sprite = QPushButton("Edit")
-        edit_sprite.setObjectName("editSpriteButton")
-        edit_sprite.clicked.connect(self.edit_sprite)
-        remove_sprite = QPushButton("Remove")
-        remove_sprite.setObjectName("dangerButton")
-        remove_sprite.clicked.connect(self.remove_sprite)
-        sprite_row.addWidget(add_sprite)
-        sprite_row.addWidget(edit_sprite)
-        sprite_row.addWidget(remove_sprite)
-        right_layout.addLayout(sprite_row)
 
         right_layout.addWidget(self._label("Variables", "sectionTitle"))
         self.variable_list = QListWidget()
         self.variable_list.setObjectName("variableList")
-        self.variable_list.setMaximumHeight(78)
+        self.variable_list.setMaximumHeight(76)
         right_layout.addWidget(self.variable_list)
         variable_row = QHBoxLayout()
         add_variable = QPushButton("+ Variable")
@@ -1549,7 +1910,7 @@ class MainWindow(QMainWindow):
         right_layout.addWidget(self._label("My Blocks", "sectionTitle"))
         self.procedure_list = QListWidget()
         self.procedure_list.setObjectName("procedureList")
-        self.procedure_list.setMaximumHeight(90)
+        self.procedure_list.setMaximumHeight(76)
         right_layout.addWidget(self.procedure_list)
         procedure_row = QHBoxLayout()
         add_procedure = QPushButton("+ My Block")
@@ -1565,11 +1926,10 @@ class MainWindow(QMainWindow):
         procedure_row.addWidget(remove_procedure)
         right_layout.addLayout(procedure_row)
 
+        # Only build messages and preview output live in the small bottom dock.
         self.console = QTabWidget()
         self.console.setObjectName("consolePanel")
-        self.source_view = QPlainTextEdit()
-        self.source_view.setObjectName("sourceView")
-        self.source_view.setReadOnly(True)
+        self.console.setMaximumHeight(170)
         self.build_view = QPlainTextEdit()
         self.build_view.setObjectName("buildView")
         self.build_view.setReadOnly(True)
@@ -1578,7 +1938,6 @@ class MainWindow(QMainWindow):
         self.output_view.setObjectName("outputView")
         self.output_view.setReadOnly(True)
         self.output_view.setMaximumBlockCount(3000)
-        self.console.addTab(self.source_view, "Generated source")
         self.console.addTab(self.build_view, "Build log")
         self.console.addTab(self.output_view, "Preview output")
 
@@ -1589,14 +1948,14 @@ class MainWindow(QMainWindow):
         top.setStretchFactor(0, 0)
         top.setStretchFactor(1, 1)
         top.setStretchFactor(2, 0)
-        top.setSizes([290, 760, 390])
+        top.setSizes([300, 740, 390])
 
         split = QSplitter(Qt.Vertical)
         split.addWidget(top)
         split.addWidget(self.console)
-        split.setStretchFactor(0, 4)
+        split.setStretchFactor(0, 5)
         split.setStretchFactor(1, 1)
-        split.setSizes([700, 220])
+        split.setSizes([720, 150])
         self.setCentralWidget(split)
 
     @staticmethod
@@ -1607,9 +1966,6 @@ class MainWindow(QMainWindow):
 
     def _connect_signals(self):
         self.palette.blockRequested.connect(self.workspace.add_block)
-        self.palette.palette_list.itemActivated.connect(
-            lambda item: self.workspace.add_block(item.data(Qt.UserRole))
-        )
         self.workspace.projectChanged.connect(self._project_changed)
         self.workspace.error.connect(
             lambda message: self.statusBar().showMessage(message)
@@ -1617,12 +1973,9 @@ class MainWindow(QMainWindow):
         self.language_combo.currentTextChanged.connect(self._language_changed)
         self.editor_target.currentTextChanged.connect(self.workspace.set_target)
         self.sprite_list.currentRowChanged.connect(self._sprite_selected)
-        self.sprite_list.itemDoubleClicked.connect(
-            lambda: self.edit_sprite())
-        self.variable_list.itemDoubleClicked.connect(
-            lambda: self.edit_variable())
-        self.procedure_list.itemDoubleClicked.connect(
-            lambda: self.edit_procedure())
+        self.sprite_list.itemDoubleClicked.connect(self.edit_sprite)
+        self.variable_list.itemDoubleClicked.connect(self.edit_variable)
+        self.procedure_list.itemDoubleClicked.connect(self.edit_procedure)
 
     # --- project operations ---------------------------------------------------
     @staticmethod
@@ -1644,6 +1997,10 @@ class MainWindow(QMainWindow):
         for procedure in self.project.procedures:
             yield from self._all_blocks(procedure.blocks)
 
+    def workspace_target_name(self):
+        return (self.project.sprites[0].name if self.project.sprites
+                else STAGE_NAME)
+
     def _refresh_title(self):
         marker = "*" if self.dirty else ""
         self.title_label.setText(self.project.name + marker)
@@ -1657,7 +2014,8 @@ class MainWindow(QMainWindow):
         """Forget a binary that no longer matches the current project."""
         self.binary_path = None
         self.run_button.setEnabled(False)
-        self.export_binary_action.setEnabled(False)
+        if self.export_binary_action is not None:
+            self.export_binary_action.setEnabled(False)
 
     def _adopt_project(self, project, message, path=None, dirty=False):
         """Replace the active project and reset all dependent state."""
@@ -1676,7 +2034,6 @@ class MainWindow(QMainWindow):
             "Rust" if self.language == "rust" else "C++"
         )
         self.language_combo.blockSignals(False)
-        self.sprite_list.clear()
         self.workspace.set_project(self.project)
         self.palette.project = self.project
         self.engine = PreviewEngine(self.project)
@@ -1694,7 +2051,6 @@ class MainWindow(QMainWindow):
     def _project_changed(self):
         self._mark_dirty()
         self._invalidate_build()
-        self.refresh_source()
         self._refresh_lists()
         self.engine.project = self.project
         self.stage.project = self.project
@@ -1705,31 +2061,36 @@ class MainWindow(QMainWindow):
         self.language = "rust" if text == "Rust" else "cpp"
         self.project.language = self.language
         self._project_changed()
-        self.statusBar().showMessage("Target changed to %s" % text)
+        self.statusBar().showMessage("Language changed to %s" % text)
 
     def refresh_source(self):
+        """Compatibility hook only.
+
+        Generated code is deliberately not produced or displayed while editing;
+        it is created lazily by Build and by folder export.
+        """
         self.project.language = self.language
-        try:
-            source = generate_source(self.project, self.language)
-        except ValidationError as error:
-            source = "// Project is not ready to compile yet:\n// %s\n" % error
-        self.source_view.setPlainText(source)
 
     def _refresh_lists(self):
-        sprite_item = self.sprite_list.currentItem()
-        sprite_name = sprite_item.text() if sprite_item is not None else None
-        procedure_item = self.procedure_list.currentItem()
-        procedure_name = procedure_item.text().split("(")[0].replace(
-            "define ", "") if procedure_item is not None else None
         self._refresh_title()
+        target = self.workspace.current_target or self.workspace_target_name()
+        self.sprite_list.blockSignals(True)
         self.sprite_list.clear()
-        self.sprite_list.addItems([sprite.name for sprite in self.project.sprites])
-        matches = self.sprite_list.findItems(sprite_name, Qt.MatchExactly) \
-            if sprite_name else []
+        self.sprite_list.addItem(STAGE_NAME)
+        for spirit in self.project.sprites:
+            self.sprite_list.addItem(spirit.name)
+        matches = self.sprite_list.findItems(target, Qt.MatchExactly)
         if matches:
             self.sprite_list.setCurrentItem(matches[0])
-        elif self.project.sprites:
+        elif self.sprite_list.count():
             self.sprite_list.setCurrentRow(0)
+        self.sprite_list.blockSignals(False)
+        actual = (self.sprite_list.currentItem().text()
+                  if self.sprite_list.currentItem() else STAGE_NAME)
+        if actual != self.workspace.current_target:
+            self.workspace.set_current_target(actual)
+        self.palette.set_target(actual)
+
         self.variable_list.clear()
         self.variable_list.addItems([
             "%s : %s" % (variable.name, variable.type)
@@ -1743,13 +2104,15 @@ class MainWindow(QMainWindow):
             )
             self.procedure_list.addItem("define %s(%s)" %
                                         (procedure.name, parameters))
-        if procedure_name:
+        selected_procedure = self.workspace.current_procedure
+        if selected_procedure:
             matches = self.procedure_list.findItems(
-                "define %s(" % procedure_name, Qt.MatchStartsWith)
+                "define %s(" % selected_procedure, Qt.MatchStartsWith)
             if matches:
                 self.procedure_list.setCurrentItem(matches[0])
         elif self.procedure_list.count():
             self.procedure_list.setCurrentRow(0)
+
         self.editor_target.blockSignals(True)
         self.editor_target.clear()
         self.editor_target.addItems(self.workspace.target_names())
@@ -1757,8 +2120,24 @@ class MainWindow(QMainWindow):
         self.editor_target.blockSignals(False)
 
     def _sprite_selected(self, row):
-        if 0 <= row < len(self.project.sprites):
-            self.workspace.set_current_sprite(self.project.sprites[row].name)
+        if row == 0:
+            self.set_current_target(STAGE_NAME)
+        elif 0 <= row - 1 < len(self.project.sprites):
+            self.set_current_target(self.project.sprites[row - 1].name)
+
+    def set_current_target(self, name):
+        """Show scripts for a spirit name or for ``"Stage"``."""
+        name = name or STAGE_NAME
+        self.workspace.set_current_target(name)
+        self.palette.set_target(name)
+        self.sprite_list.blockSignals(True)
+        matches = self.sprite_list.findItems(name, Qt.MatchExactly)
+        if matches:
+            self.sprite_list.setCurrentItem(matches[0])
+        self.sprite_list.blockSignals(False)
+
+    def set_current_sprite(self, name):
+        self.set_current_target(name)
 
     def _confirm_discard(self, action):
         if not self.dirty:
@@ -1777,6 +2156,11 @@ class MainWindow(QMainWindow):
         return False
 
     # --- project lifecycle -----------------------------------------------------
+    def _suggested_name(self):
+        base = re.sub(r"[^A-Za-z0-9_-]+", "-",
+                      self.project.name.lower()).strip("-") or "project"
+        return base + ".bfproj"
+
     def load_example(self, name):
         if not self._confirm_discard("loading an example"):
             return
@@ -1787,12 +2171,11 @@ class MainWindow(QMainWindow):
     def new_project(self):
         if not self._confirm_discard("creating a new project"):
             return
-        sprite = Sprite(name="Sprite")
+        spirit = Sprite(name="Sprite")
         project = Project(
             name="Untitled", language=self.language,
-            sprites=[sprite],
-            scripts=[{"sprite": sprite.name, "x": 32, "y": 32,
-                      "blocks": [block("event_flag")]}],
+            sprites=[spirit],
+            scripts=[_new_target_script(spirit.name, "event_flag")],
         )
         self._adopt_project(project, "New project", dirty=True)
 
@@ -1801,8 +2184,7 @@ class MainWindow(QMainWindow):
             return
         folder = str(Path(self.project_path).parent) if self.project_path else ""
         path, _ = QFileDialog.getOpenFileName(
-            self, "Open blockforge project", folder,
-            "Blockforge project (*.json)",
+            self, "Open blockforge project", folder, PROJECT_FILTER,
         )
         if not path:
             return
@@ -1816,20 +2198,24 @@ class MainWindow(QMainWindow):
     def save_project(self, save_as=False):
         path = self.project_path
         if not path or save_as:
-            suggested = str(Path(path).name) if path else \
-                "%s.json" % re.sub(r"[^A-Za-z0-9_-]+", "-",
-                                   self.project.name.lower())
+            suggested = Path(path).name if path else self._suggested_name()
             initial = str(Path(path)) if path else suggested
             path, _ = QFileDialog.getSaveFileName(
-                self, "Save blockforge project", initial,
-                "Blockforge project (*.json)",
+                self, "Save blockforge project", initial, PROJECT_FILTER,
             )
         if not path:
             return False
+        path = str(path)
+        if not path.lower().endswith(".bfproj"):
+            path += ".bfproj"
         try:
             validate_project(self.project)
+            self.project.language = self.language
             save_project(self.project, path)
         except ValidationError as error:
+            QMessageBox.warning(self, "Cannot save project", str(error))
+            return False
+        except OSError as error:
             QMessageBox.warning(self, "Cannot save project", str(error))
             return False
         self.project_path = path
@@ -1839,41 +2225,71 @@ class MainWindow(QMainWindow):
         return True
 
     def save_project_as(self):
-        self.save_project(save_as=True)
+        return self.save_project(save_as=True)
+
+    def _export_readme(self, source_name):
+        safe = re.sub(r"[^A-Za-z0-9_-]+", "-",
+                      self.project.name.lower()).strip("-") or "program"
+        if self.language == "cpp":
+            return (
+                "# %s\n\n"
+                "Generated from a Blockforge project. Requires a C++17 compiler "
+                "and SDL2.\n\n"
+                "Build:\n  g++ -std=c++17 -O2 -pthread %s -o %s -lSDL2\n\n"
+                "Run:\n  ./%s\n"
+                % (self.project.name, source_name, safe, safe)
+            )
+        return (
+            "# %s\n\n"
+            "Generated from a Blockforge project. Requires Rust 2021 and SDL2.\n\n"
+            "Build:\n  rustc --edition 2021 -O %s -o %s -l dylib=SDL2\n\n"
+            "Run:\n  ./%s\n"
+            % (self.project.name, source_name, safe, safe)
+        )
 
     def export_source(self):
-        suffix = "cpp" if self.language == "cpp" else "rs"
-        suggested = "%s.%s" % (
-            re.sub(r"[^A-Za-z0-9_-]+", "-", self.project.name.lower()), suffix)
-        path, _ = QFileDialog.getSaveFileName(
-            self, "Export generated source", suggested,
-            "C++ source (*.cpp)" if self.language == "cpp"
-            else "Rust source (*.rs)",
-        )
-        if not path:
+        """Write a runnable source folder (not a loose source file)."""
+        initial = str(Path(self.project_path).parent) \
+            if self.project_path else ""
+        folder = QFileDialog.getExistingDirectory(
+            self, "Export project folder", initial)
+        if not folder:
             return
+        source_name = "main.cpp" if self.language == "cpp" else "main.rs"
+        target = Path(folder) / source_name
+        if target.exists():
+            answer = QMessageBox.question(
+                self, "Export project folder",
+                "%s already exists. Replace it?" % target,
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return
         try:
+            self.project.language = self.language
             source = generate_source(self.project, self.language)
-            Path(path).write_text(source, encoding="utf-8")
+            target.write_text(source, encoding="utf-8")
+            (Path(folder) / "README.md").write_text(
+                self._export_readme(source_name), encoding="utf-8")
         except (ValidationError, OSError) as error:
-            QMessageBox.warning(self, "Cannot export source", str(error))
+            QMessageBox.warning(self, "Cannot export project", str(error))
             return
-        self.statusBar().showMessage("Exported source to %s" % path)
+        self.statusBar().showMessage("Exported project to %s" % folder)
 
     def export_binary(self):
         if not self.binary_path or not Path(self.binary_path).exists():
-            self.statusBar().showMessage("Build the project before saving a binary")
+            self.statusBar().showMessage("Build the project before saving it")
             return
         path, _ = QFileDialog.getSaveFileName(
-            self, "Save compiled program", self.project.name or "program",
-            "Executable (*)",
+            self, "Save program", self.project.name or "program",
+            "Program (*)",
         )
         if not path:
             return
         try:
             shutil.copy2(self.binary_path, path)
         except OSError as error:
-            QMessageBox.warning(self, "Cannot save binary", str(error))
+            QMessageBox.warning(self, "Cannot save program", str(error))
             return
         self.statusBar().showMessage("Saved program to %s" % path)
 
@@ -1888,7 +2304,7 @@ class MainWindow(QMainWindow):
         self.project.description = dialog.description.toPlainText()
         self._project_changed()
 
-    # --- sprite, variable, and custom-block management -------------------------
+    # --- spirit, variable, and custom-block management -------------------------
     def _sprite_names(self):
         return [item.name for item in self.project.sprites]
 
@@ -1900,7 +2316,8 @@ class MainWindow(QMainWindow):
 
     def _selected_sprite(self):
         row = self.sprite_list.currentRow()
-        return self.project.sprites[row] if 0 <= row < len(
+        index = row - 1  # row 0 is the Stage
+        return self.project.sprites[index] if 0 <= index < len(
             self.project.sprites) else None
 
     def _selected_variable(self):
@@ -1939,51 +2356,61 @@ class MainWindow(QMainWindow):
         return kept
 
     def add_sprite(self):
-        dialog = SpriteDialog(names=self._sprite_names(), parent=self)
+        dialog = SpiritDialog(names=self._sprite_names(), parent=self,
+                              assets=self.project.assets)
         if not dialog.exec():
             return
-        sprite = dialog.sprite()
-        self.project.sprites.append(sprite)
-        self.workspace.current_sprite = sprite.name
+        spirit = dialog.sprite()
+        self.project.sprites.append(spirit)
+        self.set_current_target(spirit.name)
         self._project_changed()
+        self.statusBar().showMessage("Added spirit %s" % spirit.name)
 
     def edit_sprite(self):
-        sprite = self._selected_sprite()
-        if sprite is None:
+        spirit = self._selected_sprite()
+        if spirit is None:
             return
-        dialog = SpriteDialog(sprite, self._sprite_names(), self)
+        dialog = SpiritDialog(spirit, self._sprite_names(), self,
+                              assets=self.project.assets)
         if not dialog.exec():
             return
         updated = dialog.sprite()
-        old_name = sprite.name
-        sprite.name, sprite.x, sprite.y = updated.name, updated.x, updated.y
-        sprite.size, sprite.direction = updated.size, updated.direction
-        sprite.costume, sprite.costume_count = updated.costume, updated.costume_count
-        sprite.layer, sprite.shape = updated.layer, updated.shape
-        sprite.color, sprite.visible = updated.color, updated.visible
+        old_name = spirit.name
+        for key in ("name", "x", "y", "size", "direction", "costume",
+                    "costume_count", "layer", "shape", "color", "visible",
+                    "image"):
+            setattr(spirit, key, getattr(updated, key))
         if old_name != updated.name:
             for script in self.project.scripts:
-                if script["sprite"] == old_name:
+                if script_target(script) == "spirit" and \
+                        script.get("sprite") == old_name:
                     script["sprite"] = updated.name
             self._rename_expression_references(old_name, updated.name)
+            self.workspace.current_target = updated.name
             self.workspace.current_sprite = updated.name
+            self.set_current_target(updated.name)
         self._project_changed()
 
     def remove_sprite(self):
-        sprite = self._selected_sprite()
-        if sprite is None or len(self.project.sprites) <= 1:
+        spirit = self._selected_sprite()
+        if spirit is None or len(self.project.sprites) <= 1:
             return
         if not self.isVisible() or QMessageBox.question(
-                self, "Remove sprite",
-                "Remove %s and all of its scripts?" % sprite.name,
+                self, "Remove spirit",
+                "Remove %s and all of its scripts?" % spirit.name,
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
         ) == QMessageBox.StandardButton.Yes:
-            self.project.sprites.remove(sprite)
+            self.project.sprites.remove(spirit)
             self.project.scripts = [
                 item for item in self.project.scripts
-                if item["sprite"] != sprite.name
+                if script_target(item) != "spirit" or
+                item.get("sprite") != spirit.name
             ]
-            self.workspace.current_sprite = self.project.sprites[0].name
+            target = (self.project.sprites[0].name if self.project.sprites
+                      else STAGE_NAME)
+            self.workspace.current_target = target
+            self.workspace.current_sprite = target
+            self.set_current_target(target)
             self._project_changed()
 
     def add_variable(self):
@@ -2041,6 +2468,8 @@ class MainWindow(QMainWindow):
                 self.workspace.current_procedure = name
         procedure.name, procedure.params = name, params
         self._project_changed()
+        if self.workspace.current_procedure == name:
+            self.editor_target.setCurrentText("My Block: %s" % name)
 
     def remove_procedure(self):
         procedure = self._selected_procedure()
@@ -2062,11 +2491,36 @@ class MainWindow(QMainWindow):
                     item.blocks, procedure.name)
             self._project_changed()
 
+    def add_from_library(self):
+        dialog = LibraryDialog(self.project, self)
+        if not dialog.exec():
+            return
+        selection = dialog.selected()
+        if not selection:
+            return
+        kind, key = selection
+        if kind == "spirit":
+            spirit = spirit_from_preset(self.project, key)
+            self.project.sprites.append(spirit)
+            starter = spirit_start_script(key, spirit.name)
+            if starter:
+                self.project.scripts.append(deepcopy(starter))
+            self.set_current_target(spirit.name)
+            message = "Added spirit %s" % spirit.name
+        else:
+            preset = apply_stage_preset(
+                self.project, key, self.project.width, self.project.height)
+            message = "Stage look changed to %s" % preset.label
+        self._project_changed()
+        self.statusBar().showMessage(message)
+
     def choose_background(self):
-        color = QColorDialog.getColor(QColor(self.project.background), self)
-        if color.isValid():
-            self.project.background = color.name()
-            self._project_changed()
+        dialog = StageDialog(self.project, self)
+        if not dialog.exec():
+            return
+        dialog.apply(self.project)
+        self._project_changed()
+        self.statusBar().showMessage("Stage look updated")
 
     # --- preview, build, and run ---------------------------------------------
     def toggle_preview(self):
@@ -2096,9 +2550,11 @@ class MainWindow(QMainWindow):
             self.preview_button.setText("Preview")
 
     def build_project(self):
-        if self.build_process and self.build_process.state() != QProcess.NotRunning:
+        if self.build_process and \
+                self.build_process.state() != QProcess.NotRunning:
             return
         try:
+            self.project.language = self.language
             source = generate_source(self.project, self.language)
         except ValidationError as error:
             self.build_view.setPlainText("Cannot build: %s" % error)
@@ -2155,10 +2611,11 @@ class MainWindow(QMainWindow):
         else:
             self.build_view.appendPlainText("\nBuild failed (exit %s)" % code)
             self.run_button.setEnabled(False)
-            self.statusBar().showMessage("Build failed — see build log")
+            self.statusBar().showMessage("Build failed — see the build log")
 
     def run_binary(self):
-        if self.run_process and self.run_process.state() != QProcess.NotRunning:
+        if self.run_process and \
+                self.run_process.state() != QProcess.NotRunning:
             return
         if not self.binary_path or not Path(self.binary_path).exists():
             self.statusBar().showMessage("Build the project before running it")
@@ -2190,10 +2647,12 @@ class MainWindow(QMainWindow):
         self.output_view.insertPlainText(bytes(data).decode("utf-8", "replace"))
 
     def stop_all(self):
-        if self.run_process and self.run_process.state() != QProcess.NotRunning:
+        if self.run_process and \
+                self.run_process.state() != QProcess.NotRunning:
             self._terminate_process(self.run_process)
             self.statusBar().showMessage("Program stopped")
-        if self.build_process and self.build_process.state() != QProcess.NotRunning:
+        if self.build_process and \
+                self.build_process.state() != QProcess.NotRunning:
             self._terminate_process(self.build_process)
         if self.engine.running:
             self.toggle_preview()
@@ -2212,10 +2671,13 @@ class MainWindow(QMainWindow):
 def main(argv=None):
     """Command-line entrypoint for the blockforge editor."""
     parser = argparse.ArgumentParser(
-        prog="blockforge", description="Visual block editor for real C++ and Rust programs"
+        prog="blockforge",
+        description="Visual block editor for spirits, stages, and C++ or Rust programs",
     )
-    parser.add_argument("project", nargs="?", help="optional .json project to open")
-    parser.add_argument("--language", choices=["cpp", "rust"], help="initial target")
+    parser.add_argument("project", nargs="?",
+                        help="optional .bfproj project to open")
+    parser.add_argument("--language", choices=["cpp", "rust"],
+                        help="initial language")
     args = parser.parse_args(sys.argv[1:] if argv is None else argv)
 
     app = QApplication.instance() or QApplication([])
