@@ -44,7 +44,7 @@ import org.json.JSONObject
 import java.io.File
 import java.io.FileOutputStream
 
-private enum class Tab(val label: String, val icon: androidx.compose.ui.graphics.vector.ImageVector) {
+enum class Tab(val label: String, val icon: androidx.compose.ui.graphics.vector.ImageVector) {
     Dashboard("Home", Icons.Filled.Home),
     Screen("Screen", Icons.Filled.PhoneAndroid),
     Commands("Commands", Icons.Filled.Terminal),
@@ -60,7 +60,6 @@ private enum class Tab(val label: String, val icon: androidx.compose.ui.graphics
 fun LanBridgeApp() {
     val ctx = LocalContext.current
     val repo = remember { SettingsRepository(ctx) }
-    val scope = rememberCoroutineScope()
     var tab by remember { mutableStateOf(Tab.Dashboard) }
     val connStatus by BridgeConnectionService.status.collectAsState()
     val connected by BridgeConnectionService.connected.collectAsState()
@@ -166,7 +165,6 @@ fun DashboardScreen(repo: SettingsRepository, connected: Boolean, status: String
 @Composable
 fun ScreenScreen(connected: Boolean, screenRunning: Boolean) {
     val ctx = LocalContext.current
-    val activity = ctx as? Activity
     val mpm = ctx.getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
     val launcher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
         if (result.resultCode == Activity.RESULT_OK && result.data != null) {
