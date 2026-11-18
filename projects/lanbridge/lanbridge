@@ -2,11 +2,14 @@
 import os
 import sys
 
-_here = os.path.dirname(os.path.abspath(__file__))
-if _here not in sys.path:
+_here = os.path.dirname(os.path.realpath(__file__))
+_lib = os.path.join(os.path.dirname(_here), "lib", os.path.basename(__file__))
+if os.path.isdir(_lib) and _lib not in sys.path:
+    sys.path.insert(0, _lib)
+elif _here not in sys.path:
     sys.path.insert(0, _here)
 
-import gui
+from gui import main
 
 if __name__ == "__main__":
-    raise SystemExit(gui.main())
+    raise SystemExit(main())
