@@ -1,0 +1,27 @@
+# Maintainer: DogeTmV
+pkgname=blockforge
+pkgver=0.1.0
+pkgrel=2
+pkgdesc='Scratch-inspired visual block editor that generates standalone C++17 and Rust SDL2 programs'
+arch=('x86_64' 'aarch64')
+url='https://github.com/DogeTmV/arch-packages'
+license=('MIT')
+depends=('python' 'pyside6' 'qt6-svg')
+optdepends=('gcc: compile generated C++17 programs'
+            'rust: compile generated Rust 2021 programs'
+            'sdl2: build and run generated graphical programs')
+source=("local-source.tar.gz")
+sha256sums=('SKIP')
+
+package() {
+  cd "$pkgname"
+  install -Dm755 "$pkgname" "$pkgdir/usr/bin/$pkgname"
+  for module in compiler core editing examples expressions gui preview \
+                runtime_cpp runtime_rust theme; do
+    install -Dm644 "$module.py" "$pkgdir/usr/lib/$pkgname/$module.py"
+  done
+  install -Dm644 "$pkgname.desktop" "$pkgdir/usr/share/applications/$pkgname.desktop"
+  install -Dm644 icons/$pkgname.svg "$pkgdir/usr/share/icons/hicolor/scalable/apps/$pkgname.svg"
+  install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

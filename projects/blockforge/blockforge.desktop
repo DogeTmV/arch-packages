@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=blockforge
+Comment=Visual block editor for real C++17 and Rust SDL2 programs
+Exec=blockforge
+Icon=blockforge
+Terminal=false
+Categories=Development;IDE;
+Keywords=programming;scratch;cpp;rust;blocks;games;
