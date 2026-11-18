@@ -70,16 +70,16 @@ class Category:
 
 
 CATEGORIES = [
-    Category("events", "Events", "#ffab2e", "flag", "Start a script"),
-    Category("motion", "Motion", "#4c9ffe", "move", "Move and turn spirits"),
-    Category("looks", "Looks", "#a06cff", "eye", "Costumes and visibility"),
-    Category("sound", "Sound", "#d95fd6", "wave", "Tones and audio"),
-    Category("sensing", "Sensing", "#4fb8d8", "radar", "Ask about the world"),
-    Category("control", "Control", "#f3b93b", "loop", "Loops and decisions"),
-    Category("operators", "Operators", "#57c785", "braces", "Expressions"),
-    Category("variables", "Variables", "#ff8a3d", "variable", "Stored values"),
-    Category("pen", "Pen", "#2dd4bf", "pen", "Draw lines as sprites move"),
-    Category("custom", "My Blocks", "#ff6f91", "puzzle", "Your own functions"),
+    Category("events", "Events", "#FFBF00", "flag", "Start a script"),
+    Category("motion", "Motion", "#4C97FF", "move", "Move and turn spirits"),
+    Category("looks", "Looks", "#9966FF", "eye", "Costumes and visibility"),
+    Category("sound", "Sound", "#CF63CF", "wave", "Tones and audio"),
+    Category("sensing", "Sensing", "#5CB1D6", "radar", "Ask about the world"),
+    Category("control", "Control", "#FFAB19", "loop", "Loops and decisions"),
+    Category("operators", "Operators", "#59C059", "braces", "Expressions"),
+    Category("variables", "Variables", "#FF8C1A", "variable", "Stored values"),
+    Category("pen", "Pen", "#0FBD8C", "pen", "Draw lines as sprites move"),
+    Category("custom", "My Blocks", "#FF6680", "puzzle", "Your own functions"),
 ]
 CATEGORY_BY_KEY = {category.key: category for category in CATEGORIES}
 

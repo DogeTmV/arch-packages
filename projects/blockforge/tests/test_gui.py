@@ -13,11 +13,12 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtGui import QCloseEvent, QKeyEvent, QMouseEvent, QPixmap
 from PySide6.QtWidgets import (
     QApplication, QComboBox, QFileDialog, QFrame, QLabel, QLineEdit,
-    QMessageBox, QPlainTextEdit, QToolButton, QWidget,
+    QListView, QMessageBox, QPlainTextEdit, QToolButton, QWidget,
 )
 from PySide6.QtCore import QEvent, QPointF, QProcess, QMimeData, Qt
 
-from core import Procedure, Project, Sprite, block, save_project
+import theme
+from core import Procedure, Project, Sprite, Variable, block, save_project
 from examples import example_project
 from gui import (
     MOVE_MIME,
@@ -31,7 +32,7 @@ from gui import (
     main as gui_main,
 )
 from images import decode_png, encode_rgba_png
-from theme import CATEGORIES, DARK
+from theme import CATEGORIES
 
 
 class GuiTests(unittest.TestCase):
@@ -57,22 +58,138 @@ class GuiTests(unittest.TestCase):
         buttons = [self.window.findChild(QToolButton, "category_%s" % item.key)
                    for item in CATEGORIES]
         self.assertTrue(all(buttons))
-        self.assertGreaterEqual(self.window.palette_list.count(), 40)
+        self.assertGreaterEqual(self.window.palette_list.count(), 8)
         labels = [self.window.palette_list.item(index).text()
                   for index in range(self.window.palette_list.count())]
         self.assertTrue(any("move" in label.lower() for label in labels))
         self.assertFalse(any("a + b" in label for label in labels))
         self.assertFalse(any("random(" in label for label in labels))
 
-    def test_theme_is_dark_and_high_contrast(self):
-        self.assertIn("#0f1420", DARK["window"])
+    def test_theme_matches_the_scratch_3_default_palette(self):
+        scratch = theme.SCRATCH
+        self.assertEqual(scratch["menu"], "#855CD6")
+        self.assertEqual(scratch["page"], "#E5F0FF")
+        self.assertEqual(scratch["workspace"], "#F9F9F9")
+        self.assertEqual(scratch["text"], "#575E75")
+        self.assertEqual(scratch["selection"], "#4C97FF")
         stylesheet = self.window.styleSheet()
-        self.assertIn(DARK["window"], stylesheet)
-        self.assertIn("QToolButton", stylesheet)
+        self.assertIn("#855CD6", stylesheet)
+        self.assertIn("#F9F9F9", stylesheet)
+        self.assertNotIn("#0f1420", stylesheet)
+
+    def test_category_colors_match_scratch_3(self):
+        expected = {
+            "motion": "#4C97FF",
+            "looks": "#9966FF",
+            "sound": "#CF63CF",
+            "events": "#FFBF00",
+            "control": "#FFAB19",
+            "sensing": "#5CB1D6",
+            "operators": "#59C059",
+            "variables": "#FF8C1A",
+            "pen": "#0FBD8C",
+            "custom": "#FF6680",
+        }
+        self.assertEqual(
+            {item.key: item.color for item in CATEGORIES}, expected)
+
+    def test_category_order_matches_scratch_3(self):
+        buttons = self.window.palette.category_buttons
+        self.assertEqual(list(buttons), [
+            "motion", "looks", "sound", "events", "control", "sensing",
+            "operators", "variables", "pen", "custom",
+        ])
+        self.assertIsNone(self.window.findChild(QToolButton, "category_all"))
+
+    def test_palette_blocks_show_scratch_default_values(self):
+        labels = [self.window.palette_list.item(index).text()
+                  for index in range(self.window.palette_list.count())]
+        self.assertIn("move 10 steps", labels)
+        self.assertIn("turn right 15 degrees", labels)
+
+    def test_layout_uses_the_scratch_pane_structure(self):
+        for name in ("toolboxPanel", "flyoutPanel", "workspacePanel",
+                     "editorTabs", "stageHeader", "stagePane", "targetPane",
+                     "stageSelector", "spritePane", "spriteInfo"):
+            self.assertIsNotNone(
+                self.window.findChild(QWidget, name), "missing %s" % name)
+
+    def test_editor_tabs_match_scratch(self):
+        expected = {
+            "tabBlocks": "Blocks",
+            "tabCostumes": "Costumes",
+            "tabSounds": "Sounds",
+        }
+        for name, text in expected.items():
+            button = self.window.findChild(QToolButton, name)
+            self.assertIsNotNone(button, "missing %s" % name)
+            self.assertEqual(button.text(), text)
+
+    def test_stage_header_matches_scratch_controls(self):
+        for name in ("previewButton", "stopButton", "backdropButton"):
+            self.assertIsNotNone(
+                self.window.findChild(QToolButton, name), "missing %s" % name)
+
+    def test_toolbar_is_scratch_style_with_an_editable_project_title(self):
+        title = self.window.findChild(QLineEdit, "projectTitle")
+        self.assertIs(title, self.window.title_label)
+        self.assertTrue(title.isEnabled())
+        for name in ("fileMenuButton", "editMenuButton"):
+            self.assertIsNotNone(self.window.findChild(QToolButton, name))
+
+    def test_sprite_pane_uses_scratch_icon_cards(self):
+        self.assertEqual(self.window.sprite_list.viewMode(), QListView.IconMode)
+        self.assertEqual(self.window.sprite_list.item(0).text(),
+                         self.window.project.sprites[0].name)
+        stage = self.window.findChild(QToolButton, "stageSelector")
+        self.assertEqual(stage.text(), "Stage")
+
+    def test_scratch_context_menus_keep_management_actions_available(self):
+        self.assertEqual(self.window.sprite_list.contextMenuPolicy(),
+                         Qt.CustomContextMenu)
+        self.assertEqual(self.window.palette_list.contextMenuPolicy(),
+                         Qt.CustomContextMenu)
+        for name in ("_show_sprite_context_menu", "_edit_variable_named",
+                     "_remove_variable_named", "_edit_procedure_named",
+                     "_remove_procedure_named"):
+            self.assertTrue(hasattr(self.window, name), "missing %s" % name)
+
+        self.window.project.variables.append(Variable("score", "number"))
+        self.window.palette.set_category("variables")
+        menu = self.window.palette._context_menu()
+        self.assertEqual([action.text() for action in menu.actions()],
+                         ["Rename variable", "Delete variable"])
+        self.assertEqual(
+            [action.text() for action in menu.actions()[0].menu().actions()],
+            ["score"])
+        sprite_menu = self.window._sprite_context_menu()
+        self.assertEqual([action.text() for action in sprite_menu.actions()],
+                         ["Edit spirit", "Remove spirit"])
+
+    def test_project_title_can_be_edited_in_the_menu_bar(self):
+        title = self.window.findChild(QLineEdit, "projectTitle")
+        title.setFocus()
+        title.setText("My Game")
+        title.editingFinished.emit()
+        self.assertEqual(self.window.project.name, "My Game")
+        self.assertIn("*", title.text())
+
+    def test_build_console_is_hidden_in_the_default_editor(self):
+        self.assertTrue(self.window.console.isHidden())
+
+    def test_block_colors_match_scratch_3(self):
+        self.assertEqual(
+            theme.block_colors("motion"),
+            ("#4C97FF", "#4280D7", "#3373CC"),
+        )
+        self.assertEqual(
+            theme.block_colors("looks"),
+            ("#9966FF", "#855CD6", "#774DCB"),
+        )
 
     def test_project_name_is_editable(self):
-        label = self.window.findChild(QLabel, "projectTitle")
-        self.assertEqual(label.text(), "Hello Console")
+        title = self.window.findChild(QLineEdit, "projectTitle")
+        self.assertEqual(title.text(), "Hello Console")
 
     def test_stage_paints_a_visible_spirit_without_an_exception(self):
         pixmap = QPixmap(320, 240)
@@ -145,9 +262,9 @@ class GuiTests(unittest.TestCase):
 
     def test_spirit_selection_survives_a_project_refresh(self):
         self.window.load_example("catch")
-        self.window.sprite_list.setCurrentRow(1)
+        self.window.sprite_list.setCurrentRow(0)
         self.window._project_changed()
-        self.assertEqual(self.window.sprite_list.currentRow(), 1)
+        self.assertEqual(self.window.sprite_list.currentRow(), 0)
 
     def test_malformed_move_payload_is_ignored(self):
         mime = QMimeData()
@@ -428,6 +545,7 @@ class GuiWorkflowTests(unittest.TestCase):
         self.assertIn("Cannot build", self.window.build_view.toPlainText())
         self.assertIsNone(self.window.binary_path)
         self.assertFalse(self.window.run_button.isEnabled())
+        self.assertFalse(self.window.console.isHidden())
 
     def test_stopping_all_waits_for_child_processes_to_finish(self):
         class FakeProcess:

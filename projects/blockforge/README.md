@@ -49,24 +49,30 @@ blockforge is now organised around objects instead of loose scripts:
 
 ## Interface
 
-The dark, high-contrast window has three columns and a compact bottom dock:
+The editor follows Scratch 3.0's default light theme and two-column layout:
 
-- **Left — Blocks:** category sections, search, and draggable block previews.
-  Double-click a block to append it to the current script. Sprite-only blocks
-  disappear when the Stage is selected.
-- **Center — Scripts:** one framed stack per script, with nested slots for
-  loops and decisions. A small header switches between the selected object's
-  scripts and its My Blocks.
-- **Right — Objects and stage:** a list of spirits plus Stage, the scaled live
-  stage, variables, and custom blocks. Use the Library button here to add
-  presets, or edit a spirit to upload a personal picture.
-- **Bottom — Output:** tabs for the build log and preview program output. No
-  generated source is shown or regenerated while you type.
+- **Menu bar:** a 48px purple bar with File/Edit menus, the editable project
+  title, target language, and Examples. The colors are taken from Scratch's
+  `src/css/colors.css` and `src/lib/themes/default/index.js`.
+- **Left — Blocks/Costumes/Sounds:** Scratch's tab strip sits above a vertical
+  category rail and a 250px flyout. Blocks use the exact category colors and
+  puzzle-piece shapes; double-click or drag one into the workspace. Sprite-only
+  blocks disappear when the Stage is selected.
+- **Workspace:** a plain `#F9F9F9` canvas with stackable hats, C-slots, and
+  Scratch-colored reporters. The `Costumes` tab edits the selected spirit's
+  picture; `Sounds` explains that sound blocks are available in the palette.
+- **Variables and My Blocks:** made from buttons in their flyouts, then
+  renamed, edited, or deleted from Scratch-style right-click menus.
+- **Right — Stage and targets:** a 408px stage column with the green flag,
+  stop sign, backdrop control, live white stage, separate Stage selector, and
+  icon cards for spirits. The sprite info row can add/edit spirits, open the
+  library, or start a new script; right-click a card for Edit/Remove.
+- **Build output:** hidden until Build or Run, so the default editor stays as
+  clean as Scratch. Tabs then show the build log and preview program output.
 
-The toolbar has New, Open, Save, Export folder, Build, Run, Stop, language, and
-Examples. Bundled examples are **Hello Console**, **Bouncing Ball**, **Catch the
-Star**, **Pen Spiral**, **Tone Practice**, and **Night Scene**. The last one
-shows a stage script switching a built-in backdrop.
+Bundled examples are **Hello Console**, **Bouncing Ball**, **Catch the Star**,
+**Pen Spiral**, **Tone Practice**, and **Night Scene**. The last one shows a
+stage script switching a built-in backdrop.
 
 ## Saving and exporting
 
@@ -133,7 +139,7 @@ script threads.
 | `runtime_cpp.py` | Embedded C++ SDL2 runtime |
 | `runtime_rust.py` | Embedded Rust SDL2 FFI runtime |
 | `preview.py` | Safe step-based stage interpreter |
-| `theme.py` | Dark palette, stylesheet, and toolbar glyphs |
+| `theme.py` | Scratch 3.0 palette, stylesheet, block geometry, and glyphs |
 | `gui.py` | PySide6 editor window and build/run process handling |
 | `examples.py` | Six validated starter projects |
 
