@@ -1,7 +1,7 @@
 # Maintainer: DogeTmV
 pkgname=lanbridge
 pkgver=0.1.0
-pkgrel=1
+pkgrel=2
 pkgdesc='LAN companion bridge between a Linux PC and Android phone (screen, commands, clipboard, files, media)'
 arch=('any')
 url='https://github.com/DogeTmV/arch-packages'
@@ -19,6 +19,7 @@ package() {
   install -Dm644 gui.py "$pkgdir/usr/lib/$pkgname/gui.py"
   install -Dm644 theme.py "$pkgdir/usr/lib/$pkgname/theme.py"
   install -Dm644 "$pkgname.desktop" "$pkgdir/usr/share/applications/$pkgname.desktop"
+  install -Dm644 "$pkgname.service" "$pkgdir/usr/lib/systemd/user/$pkgname.service"
   install -Dm644 icons/$pkgname.svg "$pkgdir/usr/share/icons/hicolor/scalable/apps/$pkgname.svg"
   install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
   install -Dm644 TUTORIAL.md "$pkgdir/usr/share/doc/$pkgname/TUTORIAL.md"

@@ -1,0 +1,13 @@
+[Unit]
+Description=LanBridge PC server (phone companion bridge)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/lanbridge --server
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

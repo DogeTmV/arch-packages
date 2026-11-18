@@ -55,7 +55,8 @@ projects/lanbridge/
 ```bash
 cd projects/lanbridge
 python3 lanbridge --help
-python3 lanbridge
+python3 lanbridge            # desktop app (can start server from Dashboard)
+python3 lanbridge --server   # headless bridge server in foreground (for background/systemd use)
 ```
 
 Run tests:

@@ -7,7 +7,9 @@ This guide covers connecting the LanBridge Android app to the LanBridge PC app o
 ### On the PC
 
 1. Install/run LanBridge on your Linux PC.
-   - From source: `python3 lanbridge`
+   - From source: `python3 lanbridge            # desktop app
+# or run headless bridge server (for background/systemd):
+# python3 lanbridge --server`
    - Ensure dependencies are installed (Python 3, PySide6; `playerctl` optional for media control).
 2. Open **Settings** in LanBridge.
 3. Note the **Listen address** and **Port** (default port is `8765`).
@@ -87,3 +89,14 @@ When you want to use LanBridge away from home, put both devices on the same priv
 ## 6. Desktop mirroring note (PC ↔ phone)
 
 LanBridge currently focuses on **phone → PC** screen viewing/control and feature sync. Full, low-latency **PC screen control from phone** is a different problem (capture, encoding, input injection on the desktop session). For that use case today, pair LanBridge with a dedicated remote-desktop tool over the same LAN/Tailscale (e.g. WayVNC/VNC, RustDesk, Sunshine/Moonlight depending on your setup), and use LanBridge for commands, clipboard, files, notifications, and media.
+
+
+
+## Background connection tips (Android)
+
+- Keep LanBridge battery optimization disabled/unrestricted so the foreground connection service can reconnect reliably.
+- Allow notifications (Android 13+) so the foreground service notification can be shown.
+- After saving host/token in Settings, LanBridge starts a foreground service and will try to reconnect automatically in background and after reboot (if configured).
+- For remote control, enable **Accessibility** for LanBridge (Installed apps/downloaded services → LanBridge). Status in the app updates when the service connects.
+- For notification/call/message mirroring, enable **Notification access** for LanBridge.
+

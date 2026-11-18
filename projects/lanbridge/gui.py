@@ -18,6 +18,7 @@ import theme
 def build_parser():
     p = argparse.ArgumentParser(prog="lanbridge", description="LAN bridge between PC and Android phone")
     p.add_argument("--version", action="version", version=f"lanbridge {core.VERSION}")
+    p.add_argument("--server", "--headless", action="store_true", dest="server", help="Run only the bridge server in the foreground (no GUI), suitable for background/systemd use")
     p.add_argument("--no-gui", action="store_true", help=argparse.SUPPRESS)
     return p
 
@@ -528,6 +529,40 @@ def main(argv=None):
     cfg = core.load_config()
     if args.no_gui:
         print(json.dumps({"ok": True, "version": core.VERSION, "port": cfg.get("port")}))
+        return 0
+    if getattr(args, "server", False):
+        import signal
+
+        state = server.BridgeState(cfg)
+        th = server.ServerThread(state)
+        th.start()
+        time.sleep(0.2)
+        if th.error:
+            print(f"Server failed: {th.error}", file=sys.stderr)
+            return 1
+        host = cfg.get("listen_host")
+        port = cfg.get("port")
+        print(f"LanBridge server {core.VERSION} listening on {host}:{port}")
+        print(f"Pairing token: {cfg.get('token')}")
+        print("Press Ctrl+C to stop.", flush=True)
+
+        stop = False
+
+        def _stop(*_a):
+            nonlocal stop
+            stop = True
+
+        try:
+            signal.signal(signal.SIGTERM, _stop)
+        except Exception:
+            pass
+        try:
+            while not stop and th.is_alive():
+                time.sleep(0.5)
+        except KeyboardInterrupt:
+            pass
+        th.stop()
+        print("Server stopped")
         return 0
     from PySide6 import QtWidgets
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv[:1])

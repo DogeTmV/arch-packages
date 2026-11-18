@@ -64,6 +64,14 @@ fun LanBridgeApp() {
     val connStatus by BridgeConnectionService.status.collectAsState()
     val connected by BridgeConnectionService.connected.collectAsState()
     val screenRunning by ScreenCaptureService.running.collectAsState()
+    val config by repo.configFlow.collectAsState(initial = ConnectionConfig())
+
+    // Auto-connect in background when configured (keeps service running/reconnecting)
+    LaunchedEffect(config.host, config.token) {
+        if (config.host.isNotBlank() && config.token.isNotBlank()) {
+            try { BridgeConnectionService.start(ctx) } catch (_: Exception) {}
+        }
+    }
 
     Scaffold(
         containerColor = Bg,
@@ -139,12 +147,15 @@ fun DashboardScreen(repo: SettingsRepository, connected: Boolean, status: String
             Text(if (connected) "Connected to ${config.host}:${config.port}" else status, color = if (connected) AccentGreen else TextMuted)
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Button(onClick = {
-                    if (Build.VERSION.SDK_INT >= 33) notifPerm.launch(Manifest.permission.POST_NOTIFICATIONS)
-                    ctx.startForegroundService(Intent(ctx, BridgeConnectionService::class.java).setAction(BridgeConnectionService.ACTION_START))
-                }, enabled = !connected) { Text("Connect") }
-                OutlinedButton(onClick = { ctx.startService(Intent(ctx, BridgeConnectionService::class.java).setAction(BridgeConnectionService.ACTION_STOP)) }, enabled = connected) { Text("Disconnect") }
+                    if (Build.VERSION.SDK_INT >= 33) {
+                        try { notifPerm.launch(Manifest.permission.POST_NOTIFICATIONS) } catch (_: Exception) {}
+                    }
+                    try { BridgeConnectionService.start(ctx) } catch (_: Exception) {}
+                }, enabled = config.host.isNotBlank() && config.token.isNotBlank()) { Text(if (connected) "Reconnect" else "Connect") }
+                OutlinedButton(onClick = { try { BridgeConnectionService.stop(ctx) } catch (_: Exception) {} }, enabled = connected) { Text("Disconnect") }
             }
             if (config.host.isBlank() || config.token.isBlank()) Text("Set PC host and pairing token in Settings first.", color = Warn, style = MaterialTheme.typography.bodySmall)
+            else Text("LanBridge runs as a foreground service and will keep trying to reconnect in the background when configured.", color = TextMuted, style = MaterialTheme.typography.bodySmall)
         }
         CardBox("Features") {
             val items = listOf(Tab.Screen to "View/control phone screen", Tab.Commands to "Saved & custom commands", Tab.Clipboard to "Shared clipboard", Tab.Files to "Send and receive files", Tab.Messages to "Notifications & call events", Tab.Media to "Media controls")
@@ -180,15 +191,22 @@ fun ScreenScreen(connected: Boolean, screenRunning: Boolean) {
         CardBox("Phone screen sharing") {
             Text(if (screenRunning) "Sharing screen frames to PC." else "Start sharing so the PC can view your phone screen.", color = if (screenRunning) AccentGreen else TextMuted)
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Button(onClick = { launcher.launch(mpm.createScreenCaptureIntent()) }, enabled = connected && !screenRunning) { Text("Start sharing") }
-                OutlinedButton(onClick = { ctx.startService(Intent(ctx, ScreenCaptureService::class.java).setAction(ScreenCaptureService.ACTION_STOP)) }, enabled = screenRunning) { Text("Stop") }
+                Button(onClick = {
+                    try { launcher.launch(mpm.createScreenCaptureIntent()) } catch (_: Exception) {}
+                }, enabled = connected && !screenRunning) { Text("Start sharing") }
+                OutlinedButton(onClick = {
+                    try { ctx.startService(Intent(ctx, ScreenCaptureService::class.java).setAction(ScreenCaptureService.ACTION_STOP)) } catch (_: Exception) {}
+                }, enabled = screenRunning) { Text("Stop") }
             }
             if (!connected) Text("Connect to PC first.", color = Warn, style = MaterialTheme.typography.bodySmall)
         }
         CardBox("Remote control") {
-            val enabled = LanBridgeAccessibilityService.isEnabled()
+            val enabled by LanBridgeAccessibilityService.enabled.collectAsState()
             Text(if (enabled) "Accessibility service is enabled. PC can send taps/swipes/navigation." else "Accessibility service is not enabled. PC view works, but remote control needs Accessibility.", color = if (enabled) AccentGreen else Warn)
-            OutlinedButton(onClick = { ctx.startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) }) { Text("Open Accessibility settings") }
+            OutlinedButton(onClick = {
+                try { ctx.startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) } catch (_: Exception) {}
+            }) { Text("Open Accessibility settings") }
+            Text("In Accessibility settings, open Installed apps/downloaded services → LanBridge and turn it on. Return to this screen after enabling; status updates when the service connects.", color = TextMuted, style = MaterialTheme.typography.bodySmall)
         }
         CardBox("Notes") {
             Text("Screen capture requires approving the system prompt each session. Some apps may appear blank due to secure/DRM flags.", color = TextMuted, style = MaterialTheme.typography.bodySmall)
@@ -204,12 +222,23 @@ fun CommandsScreen(repo: SettingsRepository, connected: Boolean) {
     var name by remember { mutableStateOf("") }
     var action by remember { mutableStateOf("open_url") }
     var payloadText by remember { mutableStateOf("{\"url\":\"https://example.com\"}") }
+    var statusMsg by remember { mutableStateOf("") }
     Column(Modifier.fillMaxSize().padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
         CardBox("Add saved command") {
             OutlinedTextField(name, { name = it }, label = { Text("Name") }, modifier = Modifier.fillMaxWidth(), singleLine = true)
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 listOf("open_url", "notify", "clipboard_push", "media", "shell").forEach { a ->
-                    FilterChip(selected = action == a, onClick = { action = a }, label = { Text(a, maxLines = 1) })
+                    FilterChip(selected = action == a, onClick = {
+                        action = a
+                        payloadText = when (a) {
+                            "open_url" -> "{\"url\":\"https://example.com\"}"
+                            "notify" -> "{\"message\":\"Hello from LanBridge\"}"
+                            "clipboard_push" -> "{}"
+                            "media" -> "{\"cmd\":\"play_pause\"}"
+                            "shell" -> "{\"argv\":[\"/system/bin/sh\",\"-c\",\"echo hi\"]}"
+                            else -> "{}"
+                        }
+                    }, label = { Text(a, maxLines = 1) })
                 }
             }
             OutlinedTextField(payloadText, { payloadText = it }, label = { Text("Payload JSON") }, modifier = Modifier.fillMaxWidth(), minLines = 2)
@@ -217,8 +246,9 @@ fun CommandsScreen(repo: SettingsRepository, connected: Boolean) {
                 val n = name.trim(); if (n.isEmpty()) return@Button
                 val payload = try { JSONObject(payloadText.ifBlank { "{}" }) } catch (_: Exception) { JSONObject() }
                 val cmd = SavedCommand(id = "cmd_${System.currentTimeMillis()}", name = n, action = action, payload = payload)
-                scope.launch { repo.saveCommands(commands + cmd); name = "" }
+                scope.launch { repo.saveCommands(commands + cmd); name = ""; statusMsg = "Saved \"$n\"" }
             }) { Text("Save command") }
+            if (statusMsg.isNotBlank()) Text(statusMsg, color = TextMuted, style = MaterialTheme.typography.bodySmall)
         }
         Text("Saved commands", fontWeight = FontWeight.SemiBold)
         LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.weight(1f, fill = true)) {
@@ -231,8 +261,16 @@ fun CommandsScreen(repo: SettingsRepository, connected: Boolean) {
                         }
                         TextButton(onClick = {
                             scope.launch {
+                                statusMsg = "Running ${cmd.name}…"
                                 val result = CommandExecutor.execute(ctx, JSONObject().apply { put("id", cmd.id); put("name", cmd.name); put("action", cmd.action); put("payload", cmd.payload) }, BridgeConnectionService.instance?.api)
-                                if (connected) BridgeConnectionService.instance?.api?.postEvent("command_result", JSONObject().put("name", cmd.name).put("ok", result.first).put("message", result.second))
+                                statusMsg = if (result.first) "OK: ${result.second}" else "Failed: ${result.second}"
+                                if (connected) {
+                                    withContext(Dispatchers.IO) {
+                                        try {
+                                            BridgeConnectionService.instance?.api?.postEvent("command_result", JSONObject().put("name", cmd.name).put("ok", result.first).put("message", result.second))
+                                        } catch (_: Exception) {}
+                                    }
+                                }
                             }
                         }) { Text("Run") }
                         TextButton(onClick = { scope.launch { repo.saveCommands(commands.filterNot { it.id == cmd.id }) } }) { Text("Delete", color = Danger) }
@@ -254,17 +292,22 @@ fun ClipboardScreen(connected: Boolean) {
         CardBox("Shared clipboard") {
             OutlinedTextField(text, { text = it }, modifier = Modifier.fillMaxWidth().heightIn(min = 180.dp), label = { Text("Text") })
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                Button(onClick = { CommandExecutor.setClipboardText(ctx, text); msg = "Copied to phone clipboard" }, modifier = Modifier.weight(1f)) { Text("Copy local") }
+                Button(onClick = {
+                    scope.launch(Dispatchers.IO) { CommandExecutor.setClipboardText(ctx, text) }
+                    msg = "Copied to phone clipboard"
+                }, modifier = Modifier.weight(1f)) { Text("Copy local") }
                 Button(onClick = {
                     scope.launch {
-                        val r = BridgeConnectionService.instance?.api?.setClipboard(text)
+                        msg = "Sending…"
+                        val r = withContext(Dispatchers.IO) { BridgeConnectionService.instance?.api?.setClipboard(text) }
                         msg = if (r?.isSuccess == true) "Sent to PC/shared" else "Send failed: ${r?.exceptionOrNull()?.message ?: "not connected"}"
                     }
                 }, enabled = connected, modifier = Modifier.weight(1f)) { Text("Send to PC") }
             }
             OutlinedButton(onClick = {
                 scope.launch {
-                    val r = BridgeConnectionService.instance?.api?.getClipboard()
+                    msg = "Fetching…"
+                    val r = withContext(Dispatchers.IO) { BridgeConnectionService.instance?.api?.getClipboard() }
                     if (r?.isSuccess == true) { text = r.getOrNull().orEmpty(); msg = "Fetched shared clipboard" }
                     else msg = "Fetch failed: ${r?.exceptionOrNull()?.message ?: "not connected"}"
                 }
@@ -436,14 +479,30 @@ fun SettingsScreen(repo: SettingsRepository) {
             OutlinedTextField(token, { token = it }, label = { Text("Pairing token") }, modifier = Modifier.fillMaxWidth(), singleLine = true)
             OutlinedTextField(name, { name = it }, label = { Text("This device name") }, modifier = Modifier.fillMaxWidth(), singleLine = true)
             Button(onClick = {
-                val p = port.toIntOrNull() ?: 8765
-                scope.launch { repo.saveConfig(ConnectionConfig(host.trim(), p, token.trim(), name.trim().ifBlank { android.os.Build.MODEL ?: "Android" })); msg = "Saved" }
-            }, modifier = Modifier.fillMaxWidth()) { Text("Save settings") }
+                val p = port.toIntOrNull()?.coerceIn(1, 65535) ?: 8765
+                val cfg = ConnectionConfig(host.trim(), p, token.trim(), name.trim().ifBlank { android.os.Build.MODEL ?: "Android" })
+                scope.launch {
+                    repo.saveConfig(cfg)
+                    msg = "Saved"
+                    if (cfg.host.isNotBlank() && cfg.token.isNotBlank()) {
+                        try { BridgeConnectionService.start(ctx) } catch (_: Exception) {}
+                    }
+                }
+            }, modifier = Modifier.fillMaxWidth()) { Text("Save settings & connect") }
             if (msg.isNotBlank()) Text(msg, color = AccentGreen)
+            Text("After saving with a valid host/token, LanBridge will keep a foreground connection service running and auto-reconnect in background.", color = TextMuted, style = MaterialTheme.typography.bodySmall)
         }
         CardBox("Permissions & access") {
-            Text("Grant only what you need: Screen capture prompt (sharing), Accessibility (remote control), Notification access (mirroring), Files/Media (sending).", color = TextMuted, style = MaterialTheme.typography.bodySmall)
-            OutlinedButton(onClick = { ctx.startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:${ctx.packageName}")).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) }, modifier = Modifier.fillMaxWidth()) { Text("App info / permissions") }
+            Text("Grant only what you need: Screen capture prompt (sharing), Accessibility (remote control/taps), Notification access (mirroring), Files/Media (sending).", color = TextMuted, style = MaterialTheme.typography.bodySmall)
+            OutlinedButton(onClick = { try { ctx.startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:${ctx.packageName}")).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) } catch (_: Exception) {} }, modifier = Modifier.fillMaxWidth()) { Text("App info / permissions") }
+            OutlinedButton(onClick = { try { ctx.startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) } catch (_: Exception) {} }, modifier = Modifier.fillMaxWidth()) { Text("Accessibility settings") }
+            OutlinedButton(onClick = { try { ctx.startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) } catch (_: Exception) {} }, modifier = Modifier.fillMaxWidth()) { Text("Notification access settings") }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                OutlinedButton(onClick = {
+                    try { ctx.startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) } catch (_: Exception) {}
+                }, modifier = Modifier.fillMaxWidth()) { Text("Battery optimization settings") }
+            }
+            Text("For reliable background connection, disable battery optimizations for LanBridge and allow notifications.", color = TextMuted, style = MaterialTheme.typography.bodySmall)
         }
     }
 }
